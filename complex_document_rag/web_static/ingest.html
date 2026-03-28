@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>复杂文档摄入</title>
+    <style>
+      :root {
+        --bg: #f5f4ef;
+        --sidebar-bg: #ebe9e4;
+        --panel: #ffffff;
+        --ink: #1a1a17;
+        --muted: #6b6860;
+        --line: rgba(26, 26, 23, 0.1);
+        --accent: #0f6d62;
+        --accent-hover: #0d5c53;
+        --accent-soft: rgba(15, 109, 98, 0.1);
+        --warn: #8b3e22;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      body {
+        display: flex;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: -apple-system, "Helvetica Neue", "PingFang SC", sans-serif;
+      }
+
+      .sidebar {
+        width: 260px;
+        min-height: 100vh;
+        background: var(--sidebar-bg);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 8px 0;
+      }
+
+      .app-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 16px 12px;
+        font-weight: 700;
+        font-size: 16px;
+      }
+
+      .app-icon { color: var(--accent); font-size: 22px; }
+
+      .new-chat-btn,
+      .nav-link {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: calc(100% - 16px);
+        margin: 0 8px 6px;
+        padding: 10px 14px;
+        border: 1px solid rgba(26, 26, 23, 0.14);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--ink);
+        text-decoration: none;
+        font: inherit;
+        font-size: 14px;
+      }
+
+      .nav-link.is-active {
+        background: rgba(15, 109, 98, 0.1);
+        border-color: rgba(15, 109, 98, 0.3);
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .sidebar-divider {
+        border: none;
+        border-top: 1px solid var(--line);
+        margin: 4px 0;
+      }
+
+      .sidebar-section-label {
+        padding: 10px 16px 4px;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+      }
+
+      .sidebar-note {
+        padding: 0 16px;
+        font-size: 13px;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+
+      .sidebar-footer {
+        margin-top: auto;
+        padding: 12px 16px;
+        border-top: 1px solid var(--line);
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .main {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(1320px, calc(100vw - 64px));
+        margin: 0 auto;
+        padding: 32px 0 28px;
+      }
+
+      .page-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 22px;
+      }
+
+      .page-title {
+        font-size: 30px;
+        letter-spacing: -0.03em;
+      }
+
+      .page-subtitle {
+        margin-top: 8px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .back-link {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 700;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
+        gap: 20px;
+        align-items: start;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 20px;
+        box-shadow: 0 10px 28px rgba(26, 26, 23, 0.04);
+      }
+
+      .panel h2 {
+        font-size: 18px;
+        margin-bottom: 6px;
+      }
+
+      .panel-intro {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.7;
+        margin-bottom: 18px;
+      }
+
+      .dropzone {
+        display: grid;
+        gap: 10px;
+        padding: 18px;
+        border: 1.5px dashed rgba(15, 109, 98, 0.28);
+        border-radius: 16px;
+        background: rgba(15, 109, 98, 0.05);
+        margin-bottom: 16px;
+      }
+
+      .dropzone strong { font-size: 16px; }
+      .dropzone p { color: var(--muted); line-height: 1.6; }
+
+      .field {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+
+      .field label {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .field input,
+      .field select {
+        width: 100%;
+        border: 1px solid rgba(26, 26, 23, 0.14);
+        border-radius: 12px;
+        padding: 12px 14px;
+        font: inherit;
+        background: #fff;
+      }
+
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: none;
+        border-radius: 12px;
+        padding: 12px 16px;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+        text-decoration: none;
+      }
+
+      .button-primary {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .button-primary:hover { background: var(--accent-hover); }
+
+      .button-secondary {
+        background: #fff;
+        color: var(--ink);
+        border: 1px solid rgba(26, 26, 23, 0.14);
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+
+      .metric {
+        border: 1px solid rgba(26, 26, 23, 0.08);
+        border-radius: 14px;
+        padding: 14px;
+        background: #fcfbf8;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+
+      .metric-value {
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 1.6;
+        word-break: break-word;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(26, 26, 23, 0.08);
+        font-size: 13px;
+        font-weight: 700;
+        margin-bottom: 16px;
+      }
+
+      .status-pill.is-running,
+      .status-pill.is-queued {
+        background: rgba(15, 109, 98, 0.12);
+        color: var(--accent);
+      }
+
+      .status-pill.is-succeeded {
+        background: rgba(15, 109, 98, 0.16);
+        color: var(--accent);
+      }
+
+      .status-pill.is-failed {
+        background: rgba(139, 62, 34, 0.12);
+        color: var(--warn);
+      }
+
+      .log-box {
+        min-height: 420px;
+        max-height: 560px;
+        overflow: auto;
+        border-radius: 16px;
+        border: 1px solid rgba(26, 26, 23, 0.08);
+        background: #171511;
+        color: #f0ece4;
+        padding: 14px 16px;
+        white-space: pre-wrap;
+        line-height: 1.7;
+        font: 13px/1.7 "SF Mono", "Fira Code", monospace;
+      }
+
+      .empty-state {
+        color: var(--muted);
+        border: 1px dashed rgba(26, 26, 23, 0.14);
+        border-radius: 14px;
+        padding: 18px;
+        line-height: 1.7;
+        background: rgba(255, 255, 255, 0.7);
+      }
+
+      .error {
+        color: var(--warn);
+        margin-top: 12px;
+        line-height: 1.7;
+      }
+
+      @media (max-width: 1080px) {
+        .workspace {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 860px) {
+        body {
+          display: block;
+        }
+
+        .sidebar {
+          width: 100%;
+          min-height: auto;
+        }
+
+        .page {
+          width: min(100vw - 32px, 960px);
+          padding-top: 20px;
+        }
+
+        .page-head {
+          display: grid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="app-header">
+        <span class="app-icon">✦</span>
+        <span>RAG 知识库</span>
+      </div>
+      <a class="new-chat-btn" href="/">← 返回智能问答</a>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section-label">导航</div>
+      <a class="nav-link" href="/">智能问答</a>
+      <a class="nav-link is-active" href="/ingest">文档摄入</a>
+      <hr class="sidebar-divider" />
+      <div class="sidebar-section-label">说明</div>
+      <div class="sidebar-note">
+        当前版本只支持 PDF 上传。摄入会自动复用当前项目的 OCR、结构化和向量入库链路。
+      </div>
+      <div class="sidebar-footer">复杂文档 RAG · 本地调试</div>
+    </aside>
+
+    <main class="main">
+      <div class="page">
+        <div class="page-head">
+          <div>
+            <h1 class="page-title">文档摄入</h1>
+            <p class="page-subtitle">
+              上传 PDF 后，系统会自动执行 OCR、生成中间产物，并写入文本、图片、表格三套向量索引。
+            </p>
+          </div>
+          <a class="back-link" href="/">去智能问答 →</a>
+        </div>
+
+        <section class="workspace">
+          <div class="panel">
+            <h2>上传与参数</h2>
+            <p class="panel-intro">左侧设置 OCR 参数，右侧实时查看任务状态和日志。</p>
+
+            <div class="dropzone">
+              <strong>上传 PDF</strong>
+              <p>选择单个 `.pdf` 文件。重复上传同名文档时，会先清理旧向量再重新入库。</p>
+              <input id="fileInput" type="file" accept="application/pdf,.pdf" />
+            </div>
+
+            <div class="field">
+              <label for="ocrModelSelect">OCR 模型</label>
+              <select id="ocrModelSelect"></select>
+            </div>
+
+            <div class="field">
+              <label for="workersInput">OCR 并发数</label>
+              <input id="workersInput" type="number" min="1" step="1" />
+              <div class="hint">并发数越高，OCR 越快，但也更吃 API 配额和本机资源。</div>
+            </div>
+
+            <div class="hint">
+              会生成 `document.md`、`image_descriptions.json`、`table_blocks.json`，并写入
+              `text_chunks` / `image_descriptions` / `table_blocks`。
+            </div>
+
+            <div class="actions">
+              <button id="startIngestButton" class="button button-primary" type="button">开始摄入</button>
+              <button id="goToChatButton" class="button button-secondary" type="button">完成后前往智能问答</button>
+            </div>
+
+            <div id="formError" class="error" hidden></div>
+          </div>
+
+          <div class="panel">
+            <h2>任务状态 / 实时日志</h2>
+            <p class="panel-intro">这里会显示当前任务的状态、doc_id、输出目录和执行日志。</p>
+
+            <div id="jobStatusPill" class="status-pill">尚未开始</div>
+
+            <div class="summary-grid">
+              <div class="metric">
+                <div class="metric-label">当前文件</div>
+                <div id="jobFilename" class="metric-value">-</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">doc_id</div>
+                <div id="jobDocId" class="metric-value">-</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">OCR 参数</div>
+                <div id="jobParams" class="metric-value">-</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">输出目录</div>
+                <div id="jobOutputDir" class="metric-value">-</div>
+              </div>
+            </div>
+
+            <div id="jobEmptyState" class="empty-state">
+              还没有任务。上传 PDF 并点击“开始摄入”后，这里会实时刷新日志。
+            </div>
+            <pre id="jobLogs" class="log-box" hidden></pre>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const fileInput = document.getElementById("fileInput");
+      const ocrModelSelect = document.getElementById("ocrModelSelect");
+      const workersInput = document.getElementById("workersInput");
+      const startIngestButton = document.getElementById("startIngestButton");
+      const goToChatButton = document.getElementById("goToChatButton");
+      const formError = document.getElementById("formError");
+      const jobStatusPill = document.getElementById("jobStatusPill");
+      const jobFilename = document.getElementById("jobFilename");
+      const jobDocId = document.getElementById("jobDocId");
+      const jobParams = document.getElementById("jobParams");
+      const jobOutputDir = document.getElementById("jobOutputDir");
+      const jobEmptyState = document.getElementById("jobEmptyState");
+      const jobLogs = document.getElementById("jobLogs");
+
+      let activeJobId = "";
+      let pollTimer = null;
+
+      function setError(message) {
+        const text = String(message || "").trim();
+        formError.hidden = !text;
+        formError.textContent = text;
+      }
+
+      function setPendingState(pending) {
+        startIngestButton.disabled = pending;
+        startIngestButton.textContent = pending ? "摄入中…" : "开始摄入";
+      }
+
+      function renderJob(job) {
+        jobEmptyState.hidden = true;
+        jobLogs.hidden = false;
+        jobStatusPill.className = `status-pill is-${job.status || "idle"}`;
+        jobStatusPill.textContent = {
+          queued: "排队中",
+          running: "处理中",
+          succeeded: "已完成",
+          failed: "失败",
+        }[job.status] || "未知状态";
+        jobFilename.textContent = job.filename || "-";
+        jobDocId.textContent = job.doc_id || "-";
+        jobParams.textContent = `${job.ocr_model || "-"} / 并发 ${job.workers ?? "-"}`;
+        jobOutputDir.textContent = job.output_dir || "-";
+        jobLogs.textContent = (job.logs || []).join("\n");
+        jobLogs.scrollTop = jobLogs.scrollHeight;
+
+        if (job.status === "queued" || job.status === "running") {
+          setPendingState(true);
+        } else {
+          setPendingState(false);
+        }
+
+        if (job.status === "failed" && job.error) {
+          setError(job.error);
+        }
+      }
+
+      async function loadOptions() {
+        const response = await fetch("/api/ingest/options");
+        if (!response.ok) throw new Error("加载摄入参数失败");
+        const payload = await response.json();
+        ocrModelSelect.innerHTML = (payload.ocr_models || [])
+          .map((model) => `<option value="${model}">${model}</option>`)
+          .join("");
+        ocrModelSelect.value = payload.default_ocr_model || "";
+        workersInput.value = payload.default_workers || 4;
+        workersInput.min = payload.min_workers || 1;
+        workersInput.max = payload.max_workers || 12;
+      }
+
+      async function pollJobStatus() {
+        if (!activeJobId) return;
+        const response = await fetch(`/api/ingest/jobs/${encodeURIComponent(activeJobId)}`);
+        if (!response.ok) {
+          setError("获取任务状态失败");
+          setPendingState(false);
+          return;
+        }
+
+        const payload = await response.json();
+        renderJob(payload);
+
+        if (payload.status === "queued" || payload.status === "running") {
+          pollTimer = window.setTimeout(pollJobStatus, 1500);
+          return;
+        }
+
+        pollTimer = null;
+      }
+
+      async function startIngest() {
+        setError("");
+        if (pollTimer) {
+          window.clearTimeout(pollTimer);
+          pollTimer = null;
+        }
+
+        const file = fileInput.files?.[0];
+        if (!file) {
+          setError("请先选择一个 PDF 文件。");
+          return;
+        }
+
+        if (!String(file.name || "").toLowerCase().endsWith(".pdf")) {
+          setError("当前只支持 PDF 上传。");
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("ocr_model", ocrModelSelect.value);
+        formData.append("workers", String(workersInput.value || 4));
+
+        setPendingState(true);
+
+        try {
+          const response = await fetch("/api/ingest/jobs", {
+            method: "POST",
+            body: formData,
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.detail || "创建摄入任务失败");
+          activeJobId = payload.job_id || "";
+          renderJob(payload);
+          pollJobStatus();
+        } catch (error) {
+          setPendingState(false);
+          setError(error.message || String(error));
+        }
+      }
+
+      startIngestButton.addEventListener("click", startIngest);
+      goToChatButton.addEventListener("click", () => {
+        window.location.href = "/";
+      });
+
+      loadOptions().catch((error) => {
+        setError(error.message || String(error));
+      });
+    </script>
+  </body>
+</html>

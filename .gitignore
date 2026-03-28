@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+
+complex_document_rag/ingestion_output/
+complex_document_rag/upload_jobs/
+dist/
+build/
+*.egg-info/
