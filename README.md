@@ -1,187 +1,125 @@
 # 复杂文档 RAG 解析
 
-一个可直接运行的复杂文档 RAG 项目：支持在前端上传 PDF，自动完成 OCR、结构化、向量入库，并在同一套 Web 界面里做问答验证。
+一个面向复杂 PDF 文档的多模态 RAG 项目。
 
-## 功能概览
+它支持在 Web 页面里直接上传 PDF，自动完成 OCR、结构化解析、向量入库，并在同一套界面里验证问答效果。系统会分别建立文本、图片、表格三路索引，在回答阶段做素材筛选；命中图片时会把原图传给多模态模型，流程图类问题还可以输出 Mermaid 图。
 
-- PDF-only 摄入
-- 前端上传 PDF 并选择 OCR 模型、并发数
-- 文本、图片、表格三路索引到 Qdrant
-- Web 问答页支持流式回答、思考过程展示、来源证据展示
-- 摄入完成后可直接回到问答页验证效果
+## 适合什么场景
 
-## 页面入口
+- 安全规范、SOP、工艺文件、质控文档等复杂 PDF 的问答验证
+- 带图片、流程图、表格的文档检索与解释
+- 需要先做本地原型，再集成到现有业务系统中的 RAG 项目
 
-- 智能问答页：`/`
-- 文档摄入页：`/ingest`
+## 核心能力
 
-启动服务后默认地址是 [http://127.0.0.1:8000](http://127.0.0.1:8000)。
+- 前端上传 PDF，选择 OCR 模型和并发数
+- OCR 后生成标准化中间产物
+- 文本、图片、表格三路分别写入 Qdrant
+- 流式回答、证据面板、回答附图/附表展示
+- 小模型二次筛选回答素材，减少不相关图表噪声
+- 图片命中时走多模态回答，表格命中时走结构化表格上下文
+- 流程图问题支持输出 Mermaid 代码块并在前端渲染
 
-## 目录结构
+## 系统结构
 
-```text
-complex-document-rag/
-├── README.md
-├── .env.example
-├── requirements.txt
-├── config.py
-├── data_models.py
-├── model_provider_utils.py
-├── scripts/
-│   ├── batch_ocr.py
-│   ├── postprocess.py
-│   └── table_normalizer.py
-├── complex_document_rag/
-│   ├── README.md
-│   ├── step0_document_ingestion.py
-│   ├── step4_basic_query.py
-│   ├── web_app.py
-│   └── web_static/
-└── tests/
+```mermaid
+flowchart LR
+    A["PDF 上传"] --> B["OCR / 版面解析"]
+    B --> C["标准化产物"]
+    C --> D["text_chunks"]
+    C --> E["image_descriptions"]
+    C --> F["table_blocks"]
+    D --> G["统一检索"]
+    E --> G
+    F --> G
+    G --> H["小模型素材筛选"]
+    H --> I["文本 / 多模态回答"]
+    I --> J["Web UI / API"]
 ```
 
-## 环境要求
+## 仓库亮点
+
+- 一个项目里同时包含摄入、索引、问答和前端验证页面
+- 默认走 OpenAI-compatible 接口，方便接 DashScope / Qwen 或 OpenAI
+- 保留了适合集成的 HTTP API 和 Python 内部入口
+- 文档结构清晰，便于后续替换成 pgvector 等存储层
+
+## 5 分钟跑起来
+
+### 1. 准备环境
 
 - Python 3.10+
-- 一个可访问的 LLM / embedding API
-- 本地 Qdrant
-- Git
-- Docker Desktop 或可用的 Docker 环境
+- Docker
+- 一个可用的 LLM / Embedding API Key
 
-推荐先准备虚拟环境：
+创建虚拟环境并安装依赖：
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## 配置
-
-复制环境变量模板：
-
-```bash
-cp .env.example .env
-```
-
-至少需要配置：
-
-- `OPENAI_API_KEY`
-- 如果使用 DashScope / Qwen，再配置：
-  - `DASHSCOPE_API_KEY`
-  - `OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`
-  - `MULTIMODAL_LLM_MODEL`
-  - `TEXT_LLM_MODEL`
-  - `WEB_ANSWER_LLM_MODEL`
-  - `EMBEDDING_MODEL`
-
-可选配置：
-
-- `WEB_ANSWER_ENABLE_THINKING=true`
-- `SILICONFLOW_API_KEY`
-- `RERANK_ENABLED=true`
-
-## 新电脑安装
-
-如果对方是一台全新的 Mac，建议按这个顺序装：
-
-1. 安装 Homebrew
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-2. 安装 Git、Python 和 Docker Desktop
-
-```bash
-brew install git python@3.11
-brew install --cask docker
-```
-
-3. 验证基础环境
-
-```bash
-git --version
-python3 --version
-docker --version
-```
-
-4. 克隆仓库并安装依赖
-
-```bash
-git clone <your-repo-url>
-cd complex-document-rag
-python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-5. 复制环境变量模板并填入 API Key
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-6. 启动 Docker Desktop 后再运行 Qdrant
+至少需要填写：
+
+- `OPENAI_API_KEY`
+- 如果使用 DashScope / Qwen：
+  - `OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`
+  - `TEXT_LLM_MODEL`
+  - `WEB_ANSWER_LLM_MODEL`
+  - `MULTIMODAL_LLM_MODEL`
+  - `EMBEDDING_MODEL`
+
+### 3. 启动 Qdrant
 
 ```bash
 docker run -p 6333:6333 qdrant/qdrant
 ```
 
-7. 启动服务
+### 4. 启动服务
 
 ```bash
 python complex_document_rag/web_app.py
 ```
 
-更完整的安装说明见 [docs/setup-new-machine.md](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/docs/setup-new-machine.md)。
-
-## 快速开始
-
-### 1. 启动 Qdrant
-
-```bash
-docker run -p 6333:6333 qdrant/qdrant
-```
-
-### 2. 启动 Web 服务
-
-```bash
-python complex_document_rag/web_app.py
-```
-
-### 3. 打开页面
+### 5. 打开页面
 
 - 问答页：[http://127.0.0.1:8000/](http://127.0.0.1:8000/)
 - 摄入页：[http://127.0.0.1:8000/ingest](http://127.0.0.1:8000/ingest)
 
 ## 使用方式
 
-### 方式 A：前端上传 PDF
+### 方式 A：从前端上传 PDF
 
 1. 打开 `/ingest`
-2. 选择一个 PDF
+2. 选择 PDF
 3. 选择 OCR 模型和并发数
 4. 点击“开始摄入”
-5. 摄入完成后回到问答页提问
+5. 完成后回到问答页提问
 
 ### 方式 B：命令行摄入
 
 ```bash
 python complex_document_rag/step0_document_ingestion.py \
-  --input "/absolute/path/to/your.pdf" \
+  --input "/absolute/path/to/file.pdf" \
   --ocr-model qwen3.5-plus \
   --workers 4
 ```
 
-然后启动问答页：
+然后启动问答页面：
 
 ```bash
 python complex_document_rag/web_app.py
 ```
 
-## 运行产物
+## 运行后会得到什么
 
 每次摄入会在 `complex_document_rag/ingestion_output/<doc_id>/` 下生成：
 
@@ -192,46 +130,66 @@ python complex_document_rag/web_app.py
 - `images/`
 - `raw_pdf_ocr/`
 
-这些目录已经被 `.gitignore` 忽略，不建议提交到仓库。
+这些产物会继续被索引用于问答，也可以单独供其他系统消费。
+
+## API 与集成
+
+如果你想把它接到别的系统里，优先看这两份文档：
+
+- 新电脑安装说明：[docs/setup-new-machine.md](docs/setup-new-machine.md)
+- 集成技术文档：[docs/integration-guide.md](docs/integration-guide.md)
+
+当前项目既可以：
+
+- 作为独立 Sidecar 服务，通过 HTTP 调用
+- 作为 Python 模块嵌入你的系统
+- 只复用摄入产物，由你的系统接管检索和回答
+
+## 主要目录
+
+```text
+complex-document-rag/
+├── complex_document_rag/
+│   ├── web_app.py
+│   ├── web_helpers.py
+│   ├── step0_document_ingestion.py
+│   ├── step4_basic_query.py
+│   ├── qdrant_management.py
+│   └── web_static/
+├── docs/
+├── model_provider_utils.py
+├── config.py
+├── scripts/
+└── tests/
+```
 
 ## 测试
 
-先跑最有价值的定向用例：
+建议先跑这些高价值用例：
 
 ```bash
+python -m unittest discover -s tests -p 'test_model_provider_utils.py'
+python -m unittest discover -s tests -p 'test_web_app.py'
 python -m unittest discover -s tests -p 'test_web_static_frontend.py'
 python -m unittest discover -s tests -p 'test_web_static_ingest_frontend.py'
-python -m unittest discover -s tests -p 'test_web_app.py'
 ```
 
 ## 当前边界
 
-- 只支持 PDF 上传
-- 主要面向本地调试和原型验证
-- 默认使用单机 FastAPI + 本地 Qdrant
-- 不包含用户系统、权限、任务队列和生产部署方案
+- 当前只支持 PDF 上传
+- 默认面向本地调试和原型验证
+- 默认存储层是 Qdrant
+- 暂不包含用户体系、权限控制、任务队列和生产级部署编排
 
-## 发布到 GitHub
+## 后续扩展方向
 
-如果你要把这个目录单独发到 GitHub：
-
-```bash
-cd /path/to/complex-document-rag
-git init
-git add .
-git commit -m "Initial commit"
-```
-
-然后在 GitHub 创建空仓库，再执行：
-
-```bash
-git remote add origin <your-repo-url>
-git branch -M main
-git push -u origin main
-```
+- 替换向量层为 PostgreSQL + pgvector
+- 增加多文档管理、删除和重建索引能力
+- 将摄入和问答拆分成独立服务
+- 增加更严格的生产部署和监控体系
 
 ## 补充说明
 
-- OCR 脚本已经一并放进 `scripts/`，这个仓库是自包含的
-- 如果你打开了 `WEB_ANSWER_ENABLE_THINKING=true`，前端会显示模型思考过程
-- 如果上传页返回 `{\"detail\":\"Not Found\"}`，通常是服务没重启，或者访问的不是当前仓库启动的进程
+- 如果开启 `WEB_ANSWER_ENABLE_THINKING=true`，前端会显示模型思考过程
+- 流程图问题会尝试输出 Mermaid 图，同时保留文字解释
+- 图片类问题命中后，回答模型会看到原图；表格类问题默认不传图，只传结构化表格内容
