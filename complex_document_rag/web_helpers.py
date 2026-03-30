@@ -12,6 +12,10 @@ from complex_document_rag.pipeline_utils import project_root_from_file
 
 PROJECT_ROOT = project_root_from_file(__file__)
 ARTIFACTS_ROOT = os.path.join(PROJECT_ROOT, "complex_document_rag", "ingestion_output")
+LEGACY_ARTIFACT_PREFIXES = (
+    "complex_document_rag/ingestion_output/",
+    "p0_basic_rag/ingestion_output/",
+)
 
 
 def build_artifact_url(path: str, artifacts_root: str = ARTIFACTS_ROOT) -> str:
@@ -19,6 +23,7 @@ def build_artifact_url(path: str, artifacts_root: str = ARTIFACTS_ROOT) -> str:
     if not path:
         return ""
 
+    normalized_path = str(path).replace("\\", "/")
     abs_path = os.path.abspath(path)
     abs_root = os.path.abspath(artifacts_root)
 
@@ -28,6 +33,12 @@ def build_artifact_url(path: str, artifacts_root: str = ARTIFACTS_ROOT) -> str:
         return ""
 
     if rel_path.startswith(".."):
+        for prefix in LEGACY_ARTIFACT_PREFIXES:
+            if prefix not in normalized_path:
+                continue
+            rel_path = normalized_path.split(prefix, 1)[1].lstrip("/")
+            if rel_path:
+                return f"/artifacts/{quote(rel_path)}"
         return ""
 
     return f"/artifacts/{quote(rel_path.replace(os.sep, '/'))}"
@@ -230,6 +241,22 @@ def render_answer_markdown_html(markdown: str) -> str:
                 items.append(re.sub(r"^\d+\.\s+", "", lines[index].strip()))
                 index += 1
             parts.append("<ol>" + "".join(f"<li>{_render_inline_markdown(item)}</li>" for item in items) + "</ol>")
+            continue
+
+        if stripped.startswith("```"):
+            fence_lang = stripped[3:].strip().lower()
+            index += 1
+            code_lines: list[str] = []
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index].rstrip())
+                index += 1
+            if index < len(lines) and lines[index].strip().startswith("```"):
+                index += 1
+            code_content = escape("\n".join(code_lines))
+            if fence_lang == "mermaid":
+                parts.append(f'<pre class="mermaid">{code_content}</pre>')
+            else:
+                parts.append(f"<pre><code>{code_content}</code></pre>")
             continue
 
         paragraph_lines = [stripped]

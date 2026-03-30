@@ -29,6 +29,7 @@ from config import (
     IMAGE_SIMILARITY_TOP_K,
     IMAGE_RETRIEVAL_SCORE_MARGIN,
     IMAGE_RETRIEVAL_SCORE_THRESHOLD,
+    MULTIMODAL_LLM_MODEL,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     RERANK_API_BASE,
@@ -45,7 +46,7 @@ from config import (
     WEB_ANSWER_ENABLE_THINKING,
     WEB_ANSWER_LLM_MODEL,
 )
-from model_provider_utils import create_text_llm
+from model_provider_utils import create_multimodal_llm, create_text_llm
 from complex_document_rag.document_ingestion import sanitize_doc_id
 from complex_document_rag.qdrant_management import create_qdrant_client, delete_doc_vectors
 from complex_document_rag.reranker import SiliconFlowReranker, rerank_retrieval_bundle
@@ -80,6 +81,10 @@ RETRIEVAL_RETRIES = 2
 RETRIEVAL_RETRY_DELAY_SECONDS = 0.6
 ANSWER_ASSET_TOP_K = 5
 ANSWER_ASSET_SCORE_THRESHOLD = 0.6
+ASSET_JUDGE_ENABLED = os.getenv("ASSET_JUDGE_ENABLED", "true").lower() not in {"0", "false", "no"}
+ASSET_JUDGE_MODEL = os.getenv("ASSET_JUDGE_MODEL", "qwen3.5-flash")
+ASSET_JUDGE_MAX_ASSETS = max(1, int(os.getenv("ASSET_JUDGE_MAX_ASSETS", "3")))
+ASSET_JUDGE_MAX_TOKENS = max(128, int(os.getenv("ASSET_JUDGE_MAX_TOKENS", "400")))
 TEXT_CONTEXT_TOP_K = 3
 IMAGE_CONTEXT_TOP_K = 2
 TABLE_CONTEXT_TOP_K = 2
@@ -88,6 +93,7 @@ IMAGE_SUMMARY_CHAR_LIMIT = 200
 TABLE_SUMMARY_CHAR_LIMIT = 220
 TABLE_PREVIEW_ROW_LIMIT = 3
 TABLE_PREVIEW_ROW_CHAR_LIMIT = 220
+ANSWER_IMAGE_INPUT_TOP_K = max(1, int(os.getenv("ANSWER_IMAGE_INPUT_TOP_K", "1")))
 RERANK_CONFIDENCE_FLOOR = 0.2
 QUERY_EXPANSION_SCORE_PENALTY = 0.02
 RERANKED_BRANCH_KEYS = ("text_results",)
@@ -282,6 +288,13 @@ QUERY_PHRASE_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("客户投诉",), ("customer complaint",)),
     (("质量警报",), ("quality alert", "quality sensitivity alert")),
 )
+FLOWCHART_HINT_KEYWORDS = (
+    "流程图",
+    "flow图",
+    "flowchart",
+    "process flow",
+    "mermaid",
+)
 
 
 def _dedupe_nodes(nodes: Iterable[Any]) -> list[Any]:
@@ -304,6 +317,22 @@ def _dedupe_nodes(nodes: Iterable[Any]) -> list[Any]:
 
 def _contains_cjk(text: str) -> bool:
     return bool(CJK_PATTERN.search(text or ""))
+
+
+def _should_request_mermaid_diagram(query: str, answer_assets: Iterable[Any]) -> bool:
+    haystacks = [str(query or "")]
+    for node in answer_assets:
+        metadata = getattr(node, "metadata", {}) or {}
+        haystacks.extend(
+            [
+                str(metadata.get("summary", "") or ""),
+                str(metadata.get("caption", "") or ""),
+                str(metadata.get("semantic_summary", "") or ""),
+                str(metadata.get("detailed_description", "") or ""),
+            ]
+        )
+    normalized = "\n".join(haystacks).casefold()
+    return any(keyword.casefold() in normalized for keyword in FLOWCHART_HINT_KEYWORDS)
 
 
 def _append_unique_terms(terms: list[str], values: Iterable[str]) -> None:
@@ -360,6 +389,22 @@ def _safe_page_no(node: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 10**9
+
+
+def _resolve_local_node_image_path(node: Any) -> str:
+    metadata = getattr(node, "metadata", {}) or {}
+    for candidate in (
+        metadata.get("image_path", ""),
+        metadata.get("source_image_path", ""),
+    ):
+        normalized = str(candidate or "").strip()
+        if not normalized:
+            continue
+        absolute_path = normalized if os.path.isabs(normalized) else os.path.join(PROJECT_ROOT, normalized)
+        absolute_path = os.path.abspath(absolute_path)
+        if os.path.exists(absolute_path):
+            return absolute_path
+    return ""
 
 
 def _clone_query_bundle(query_bundle: QueryBundle) -> QueryBundle:
@@ -528,8 +573,111 @@ def _sort_nodes_for_display(nodes: Iterable[Any]) -> list[Any]:
     return node_list
 
 
-def _answer_asset_order_key(node: Any) -> tuple[int, int, tuple[int, ...], str]:
+def _node_asset_id(node: Any) -> str:
     metadata = getattr(node, "metadata", {}) or {}
+    return str(metadata.get("image_id") or metadata.get("table_id") or "").strip()
+
+
+def _clear_answer_asset_rank(node: Any) -> None:
+    metadata = getattr(node, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata.pop("_answer_asset_rank", None)
+
+
+def _clean_json_response_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    return cleaned.strip()
+
+
+def _parse_json_response(text: str) -> dict[str, Any]:
+    cleaned = _clean_json_response_text(text)
+    if not cleaned:
+        raise ValueError("empty judge response")
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        if not match:
+            raise
+        parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("judge response is not a JSON object")
+    return parsed
+
+
+def _build_asset_judge_prompt(query: str, candidates: list[Any]) -> str:
+    candidate_blocks: list[str] = []
+    for node in candidates:
+        metadata = getattr(node, "metadata", {}) or {}
+        node_type = metadata.get("type", "")
+        asset_id = _node_asset_id(node)
+        page_label = metadata.get("page_label", metadata.get("page_no", "-"))
+
+        if node_type == "image_description":
+            detailed_description = _truncate_for_prompt(
+                str(metadata.get("detailed_description", "") or metadata.get("summary", "") or ""),
+                260,
+            )
+            candidate_blocks.append(
+                "\n".join(
+                    [
+                        f"- id={asset_id}",
+                        "  kind=image",
+                        f"  page={page_label}",
+                        f"  name={_node_reference_label(node)}",
+                        f"  summary={_truncate_for_prompt(str(metadata.get('summary', '') or ''), 180)}",
+                        f"  detail={detailed_description or '无'}",
+                    ]
+                )
+            )
+            continue
+
+        if node_type == "table_block":
+            candidate_blocks.append(
+                "\n".join(
+                    [
+                        f"- id={asset_id}",
+                        "  kind=table",
+                        f"  page={page_label}",
+                        f"  title={_node_reference_label(node)}",
+                        f"  preview={_build_table_prompt_preview(node)}",
+                    ]
+                )
+            )
+            continue
+
+    return (
+        "你是一个 RAG 素材筛查器。请只保留能直接支持回答用户问题的图片或表格，过滤掉只是关键词沾边但并不直接回答问题的素材。\n"
+        "判断规则：\n"
+        "1. 如果用户问题明显在找流程图、示意图、图片内容，优先保留图片；表格只有在直接解释同一问题时才保留。\n"
+        "2. 如果用户问题明显在找表格、矩阵、清单，优先保留表格；图片只有在直接补充该表格时才保留。\n"
+        "3. 不要因为素材里出现了相同关键词（如 critical defect、flow、MRB）就判定为相关。\n"
+        f"4. 最多选择 {ASSET_JUDGE_MAX_ASSETS} 个素材，按“最值得展示给用户”的顺序输出。\n"
+        "5. 只返回 JSON，不要解释。\n\n"
+        f"用户问题：{query}\n\n"
+        "候选素材：\n"
+        f"{chr(10).join(candidate_blocks) or '无'}\n\n"
+        '输出格式：{"selected_ids":["素材id1","素材id2"]}'
+    )
+
+
+def _answer_asset_order_key(node: Any) -> tuple[int, int, int, tuple[int, ...], str]:
+    metadata = getattr(node, "metadata", {}) or {}
+    judge_rank = metadata.get("_answer_asset_rank")
+    if judge_rank is not None:
+        page_no, numbers, reference = _node_display_order_key(node)
+        try:
+            normalized_rank = int(judge_rank)
+        except (TypeError, ValueError):
+            normalized_rank = 10**9
+        return (-1, normalized_rank, page_no, numbers, reference)
+
     node_type = metadata.get("type", "")
     if node_type == "table_block":
         type_priority = 0
@@ -539,7 +687,7 @@ def _answer_asset_order_key(node: Any) -> tuple[int, int, tuple[int, ...], str]:
         type_priority = 2
 
     page_no, numbers, reference = _node_display_order_key(node)
-    return (type_priority, page_no, numbers, reference)
+    return (0, type_priority, page_no, numbers, reference)
 
 
 def _sort_answer_assets(nodes: Iterable[Any]) -> list[Any]:
@@ -565,8 +713,32 @@ class QueryBackend:
             api_base=OPENAI_BASE_URL,
             disable_thinking=not WEB_ANSWER_ENABLE_THINKING,
         )
+        self.multimodal_llm = create_multimodal_llm(
+            model_name=MULTIMODAL_LLM_MODEL,
+            api_key=OPENAI_API_KEY,
+            api_base=OPENAI_BASE_URL,
+            disable_thinking=not WEB_ANSWER_ENABLE_THINKING,
+        )
+        self.asset_judge_llm = (
+            create_text_llm(
+                model_name=ASSET_JUDGE_MODEL,
+                api_key=OPENAI_API_KEY,
+                api_base=OPENAI_BASE_URL,
+                disable_thinking=True,
+            )
+            if ASSET_JUDGE_ENABLED
+            else None
+        )
         self.reranker = self._build_reranker()
         self._embedding_cache: dict[str, list[float]] = {}
+
+    def _ensure_runtime_state(self) -> None:
+        if not hasattr(self, "_embedding_cache") or self._embedding_cache is None:
+            self._embedding_cache = {}
+        if not hasattr(self, "asset_judge_llm"):
+            self.asset_judge_llm = None
+        if not hasattr(self, "multimodal_llm"):
+            self.multimodal_llm = None
 
     def _build_reranker(self) -> SiliconFlowReranker | None:
         if not RERANK_ENABLED or not RERANK_API_KEY:
@@ -579,29 +751,22 @@ class QueryBackend:
             timeout=RERANK_TIMEOUT_SECONDS,
         )
 
-    def _ensure_embedding_cache(self) -> dict[str, list[float]]:
-        cache = getattr(self, "_embedding_cache", None)
-        if cache is None:
-            cache = {}
-            self._embedding_cache = cache
-        return cache
-
     def _get_cached_embedding(self, query: str) -> list[float] | None:
+        self._ensure_runtime_state()
         if self.embed_model is None:
             return None
-        cache = self._ensure_embedding_cache()
-        if query not in cache:
-            if len(cache) >= _EMBEDDING_CACHE_MAX:
-                cache.pop(next(iter(cache)))
-            cache[query] = self.embed_model.get_query_embedding(query)
-        return cache[query]
+        if query not in self._embedding_cache:
+            if len(self._embedding_cache) >= _EMBEDDING_CACHE_MAX:
+                self._embedding_cache.pop(next(iter(self._embedding_cache)))
+            self._embedding_cache[query] = self.embed_model.get_query_embedding(query)
+        return self._embedding_cache[query]
 
     def _prefetch_embeddings(self, queries: list[str]) -> None:
         """多个 query variant 的 embedding 并行预取，结果写入缓存。"""
+        self._ensure_runtime_state()
         if self.embed_model is None:
             return
-        cache = self._ensure_embedding_cache()
-        missing = [q for q in queries if q not in cache]
+        missing = [q for q in queries if q not in self._embedding_cache]
         if len(missing) <= 1:
             for q in missing:
                 self._get_cached_embedding(q)
@@ -609,9 +774,9 @@ class QueryBackend:
         with ThreadPoolExecutor(max_workers=len(missing)) as executor:
             futures = [(q, executor.submit(self.embed_model.get_query_embedding, q)) for q in missing]
         for q, fut in futures:
-            if len(cache) >= _EMBEDDING_CACHE_MAX:
-                cache.pop(next(iter(cache)))
-            cache[q] = fut.result()
+            if len(self._embedding_cache) >= _EMBEDDING_CACHE_MAX:
+                self._embedding_cache.pop(next(iter(self._embedding_cache)))
+            self._embedding_cache[q] = fut.result()
 
     def _build_query_bundle(self, query: str) -> QueryBundle:
         return QueryBundle(query_str=query, embedding=self._get_cached_embedding(query))
@@ -830,12 +995,45 @@ class QueryBackend:
 
         raise RuntimeError(str(last_error) if last_error else "检索失败")
 
-    def select_answer_assets(self, retrieval: dict[str, list[Any]]) -> list[Any]:
+    def _judge_answer_assets(self, query: str, candidates: list[Any]) -> list[Any]:
+        self._ensure_runtime_state()
+        llm = getattr(self, "asset_judge_llm", None)
+        if llm is None or not candidates:
+            return _sort_answer_assets(candidates[:ANSWER_ASSET_TOP_K])
+
+        prompt = _build_asset_judge_prompt(query, candidates)
+        try:
+            response = llm.complete(prompt, temperature=0, max_tokens=ASSET_JUDGE_MAX_TOKENS)
+            payload = _parse_json_response(getattr(response, "text", "") or "")
+            selected_ids = payload.get("selected_ids") or payload.get("selected_asset_ids") or []
+            if not isinstance(selected_ids, list):
+                raise ValueError("selected_ids must be a list")
+        except Exception as exc:
+            LOGGER.warning("[judge   ] fallback to heuristic asset ordering: %s", exc)
+            return _sort_answer_assets(candidates[:ANSWER_ASSET_TOP_K])
+
+        selected_id_order = [str(value).strip() for value in selected_ids if str(value).strip()]
+        rank_map = {asset_id: index for index, asset_id in enumerate(selected_id_order)}
+        judged = [node for node in candidates if _node_asset_id(node) in rank_map]
+        judged.sort(key=lambda node: rank_map.get(_node_asset_id(node), 10**9))
+        judged = _dedupe_nodes(judged)[:ASSET_JUDGE_MAX_ASSETS]
+
+        for index, node in enumerate(judged):
+            metadata = getattr(node, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata["_answer_asset_rank"] = index
+
+        return _sort_answer_assets(judged)
+
+    def select_answer_assets(self, retrieval: dict[str, list[Any]], query: str = "") -> list[Any]:
+        self._ensure_runtime_state()
         candidates = sorted(
             list(retrieval.get("image_results", [])) + list(retrieval.get("table_results", [])),
             key=_safe_score,
             reverse=True,
         )
+        for node in candidates:
+            _clear_answer_asset_rank(node)
         filtered = [node for node in candidates if _safe_score(node) >= ANSWER_ASSET_SCORE_THRESHOLD]
 
         selected: list[Any] = []
@@ -871,7 +1069,10 @@ class QueryBackend:
             if len(selected) > ANSWER_ASSET_TOP_K:
                 selected = selected[:ANSWER_ASSET_TOP_K]
 
-        return _sort_answer_assets(selected[:ANSWER_ASSET_TOP_K])
+        selected = selected[:ANSWER_ASSET_TOP_K]
+        if not selected:
+            return []
+        return self._judge_answer_assets(query, selected)
 
     def select_answer_sources(self, retrieval: dict[str, list[Any]], answer_assets: list[Any]) -> list[Any]:
         text_results = sorted(retrieval.get("text_results", []), key=_safe_score, reverse=True)
@@ -892,22 +1093,26 @@ class QueryBackend:
                 f"{_truncate_for_prompt(str(getattr(node, 'text', '') or ''), TEXT_CONTEXT_CHAR_LIMIT)}"
             )
 
+        selected_image_nodes = [
+            node
+            for node in answer_assets
+            if (getattr(node, "metadata", {}) or {}).get("type", "") == "image_description"
+        ][:IMAGE_CONTEXT_TOP_K]
         image_context = []
-        for index, node in enumerate(
-            _sort_nodes_for_display(retrieval.get("image_results", [])[:IMAGE_CONTEXT_TOP_K]),
-            start=1,
-        ):
+        for index, node in enumerate(selected_image_nodes, start=1):
             metadata = getattr(node, "metadata", {}) or {}
             image_context.append(
                 f"[图片{index}] 名称={_node_reference_label(node)} 页码={metadata.get('page_label', metadata.get('page_no', '-'))} "
                 f"摘要={_truncate_for_prompt(str(metadata.get('summary', '') or ''), IMAGE_SUMMARY_CHAR_LIMIT)}"
             )
 
+        selected_table_nodes = [
+            node
+            for node in answer_assets
+            if (getattr(node, "metadata", {}) or {}).get("type", "") == "table_block"
+        ][:TABLE_CONTEXT_TOP_K]
         table_context = []
-        for index, node in enumerate(
-            _sort_nodes_for_display(retrieval.get("table_results", [])[:TABLE_CONTEXT_TOP_K]),
-            start=1,
-        ):
+        for index, node in enumerate(selected_table_nodes, start=1):
             metadata = getattr(node, "metadata", {}) or {}
             table_context.append(
                 f"[表格{index}] 标题={_node_reference_label(node)} 页码={metadata.get('page_label', metadata.get('page_no', '-'))}\n"
@@ -922,12 +1127,21 @@ class QueryBackend:
             if metadata.get("table_id"):
                 answer_asset_ids.append(f"表格:{_node_reference_label(node)}")
 
+        mermaid_instruction = ""
+        if _should_request_mermaid_diagram(query, answer_assets):
+            mermaid_instruction = (
+                "如果问题涉及流程图、流程单、flow图或 flowchart，并且证据足够，请先输出文字说明，再额外输出一个 ```mermaid "
+                "代码块来概括主流程。Mermaid 中只保留关键节点与判断分支，节点名称使用中文；若某条连线或条件无法从证据中确认，"
+                "就在文字说明中明确写出不确定，不要在 Mermaid 中编造。\n"
+            )
+
         return (
             "你是一个严谨的 RAG 问答助手。请严格基于给定上下文回答，不要编造。\n"
             "如果证据不足，请明确说证据不足。\n"
             "如果输出思考过程，也请全程使用中文，不要输出英文小标题或英文分析。\n"
             "如果下面列出的图片或表格与问题直接相关，请在回答中自然提及“见相关图片/见相关表格”。\n"
             "引用图表时只使用中文标题或名称，不要输出任何内部 ID、文件名或技术标识。\n"
+            f"{mermaid_instruction}"
             f"推荐随答案一起返回的素材：{', '.join(answer_asset_ids) if answer_asset_ids else '无'}\n\n"
             f"问题：{query}\n\n"
             "文本证据：\n"
@@ -939,12 +1153,71 @@ class QueryBackend:
             "请输出简洁、直接的中文回答。"
         )
 
+    def collect_answer_image_paths(self, answer_assets: list[Any]) -> list[str]:
+        image_paths: list[str] = []
+        seen: set[str] = set()
+        for node in answer_assets:
+            metadata = getattr(node, "metadata", {}) or {}
+            if metadata.get("type", "") != "image_description":
+                continue
+            image_path = _resolve_local_node_image_path(node)
+            if not image_path or image_path in seen:
+                continue
+            seen.add(image_path)
+            image_paths.append(image_path)
+            if len(image_paths) >= ANSWER_IMAGE_INPUT_TOP_K:
+                break
+        return image_paths
+
+    def _complete_answer(self, prompt: str, answer_assets: list[Any]):
+        self._ensure_runtime_state()
+        image_paths = self.collect_answer_image_paths(answer_assets)
+        multimodal_llm = getattr(self, "multimodal_llm", None)
+        if image_paths and multimodal_llm is not None:
+            try:
+                LOGGER.info(
+                    "[visual  ] multimodal answer  images=%d  model=%s",
+                    len(image_paths),
+                    getattr(multimodal_llm, "model_name", MULTIMODAL_LLM_MODEL),
+                )
+                response = multimodal_llm.complete(prompt, image_paths=image_paths)
+                LOGGER.info(
+                    "[visual-ok] multimodal answer active  images=%d  chars=%d",
+                    len(image_paths),
+                    len(getattr(response, "text", "") or ""),
+                )
+                return response
+            except Exception as exc:
+                LOGGER.warning("[visual  ] multimodal answer fallback to text llm: %s", exc)
+        return self.llm.complete(prompt)
+
+    def _stream_answer(self, prompt: str, answer_assets: list[Any]):
+        self._ensure_runtime_state()
+        image_paths = self.collect_answer_image_paths(answer_assets)
+        multimodal_llm = getattr(self, "multimodal_llm", None)
+        if image_paths and multimodal_llm is not None:
+            try:
+                LOGGER.info(
+                    "[visual  ] multimodal stream  images=%d  model=%s",
+                    len(image_paths),
+                    getattr(multimodal_llm, "model_name", MULTIMODAL_LLM_MODEL),
+                )
+                stream = multimodal_llm.stream_complete(prompt, image_paths=image_paths)
+                LOGGER.info(
+                    "[visual-ok] multimodal stream active  images=%d",
+                    len(image_paths),
+                )
+                return stream
+            except Exception as exc:
+                LOGGER.warning("[visual  ] multimodal stream fallback to text llm: %s", exc)
+        return self.llm.stream_complete(prompt)
+
     def answer(self, query: str, retrieval: dict[str, list[Any]] | None = None) -> dict[str, Any]:
         retrieval = retrieval or self.retrieve(query)
-        answer_assets = self.select_answer_assets(retrieval)
+        answer_assets = self.select_answer_assets(retrieval, query=query)
         answer_sources = self.select_answer_sources(retrieval, answer_assets)
         prompt = self.build_answer_prompt(query, retrieval, answer_assets)
-        response = self.llm.complete(prompt)
+        response = self._complete_answer(prompt, answer_assets)
         return {
             "answer": response.text or "",
             "answer_sources": answer_sources,
@@ -953,11 +1226,11 @@ class QueryBackend:
 
     def stream_answer(self, query: str, retrieval: dict[str, list[Any]] | None = None):
         retrieval = retrieval or self.retrieve(query)
-        answer_assets = self.select_answer_assets(retrieval)
+        answer_assets = self.select_answer_assets(retrieval, query=query)
         answer_sources = self.select_answer_sources(retrieval, answer_assets)
         prompt = self.build_answer_prompt(query, retrieval, answer_assets)
         return {
-            "stream": self.llm.stream_complete(prompt),
+            "stream": self._stream_answer(prompt, answer_assets),
             "answer_sources": answer_sources,
             "answer_assets": answer_assets,
         }
@@ -1002,7 +1275,7 @@ def _sse_event(name: str, payload: dict[str, Any]) -> str:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="复杂文档 RAG 解析",
-        description="用于本地验证文本、图片、表格召回效果的轻量前端",
+        description="用于复杂文档 OCR、检索和多模态问答的一体化本地前端",
         version="0.2.0",
     )
 
@@ -1240,7 +1513,7 @@ def create_app() -> FastAPI:
             else:
                 stream_iter = stream_result
                 raw_answer_assets = (
-                    backend.select_answer_assets(retrieval)
+                    backend.select_answer_assets(retrieval, query=payload.query)
                     if hasattr(backend, "select_answer_assets")
                     else []
                 )

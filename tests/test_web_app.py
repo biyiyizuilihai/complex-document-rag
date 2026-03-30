@@ -36,6 +36,51 @@ class _FakeStreamChunk:
         self.additional_kwargs = {"reasoning_delta": reasoning} if reasoning else {}
 
 
+class _FakeCompletion:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _CapturingJudgeLLM:
+    def __init__(self, text: str):
+        self.text = text
+        self.prompts = []
+
+    def complete(self, prompt, **kwargs):
+        self.prompts.append(prompt)
+        return _FakeCompletion(self.text)
+
+
+class _CapturingTextLLM:
+    def __init__(self, text: str = "文本回答"):
+        self.text = text
+        self.complete_prompts = []
+        self.stream_prompts = []
+
+    def complete(self, prompt, **kwargs):
+        self.complete_prompts.append(prompt)
+        return _FakeCompletion(self.text)
+
+    def stream_complete(self, prompt, **kwargs):
+        self.stream_prompts.append(prompt)
+        return iter([_FakeStreamChunk(text=self.text)])
+
+
+class _CapturingMultimodalLLM:
+    def __init__(self, text: str = "多模态回答"):
+        self.text = text
+        self.complete_calls = []
+        self.stream_calls = []
+
+    def complete(self, prompt, **kwargs):
+        self.complete_calls.append({"prompt": prompt, **kwargs})
+        return _FakeCompletion(self.text)
+
+    def stream_complete(self, prompt, **kwargs):
+        self.stream_calls.append({"prompt": prompt, **kwargs})
+        return iter([_FakeStreamChunk(text=self.text)])
+
+
 class _FakeEmbedModel:
     def __init__(self):
         self.calls = 0
@@ -462,6 +507,26 @@ class WebHelpersTests(unittest.TestCase):
         self.assertIn("/artifacts/doc_demo/images/img_p13_001.png", payload["raw_table"])
         self.assertEqual(payload["semantic_summary"], "该表概括了警告类标识及其典型作业场所。")
 
+    def test_serialize_scored_node_recovers_image_url_from_legacy_p0_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifacts_root = Path(tmpdir) / "complex_document_rag" / "ingestion_output"
+            image_path = artifacts_root / "doc_demo" / "images" / "img_p15_005.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"png")
+
+            node = _FakeNode(
+                metadata={
+                    "type": "image_description",
+                    "doc_id": "doc_demo",
+                    "summary": "注意通风标志",
+                    "source_image_path": "p0_basic_rag/ingestion_output/doc_demo/images/img_p15_005.png",
+                }
+            )
+
+            payload = serialize_scored_node(node, artifacts_root=str(artifacts_root))
+
+        self.assertEqual(payload["image_url"], "/artifacts/doc_demo/images/img_p15_005.png")
+
     def test_select_answer_assets_enforces_threshold_and_topk(self):
         backend = QueryBackend.__new__(QueryBackend)
         retrieval = {
@@ -598,6 +663,56 @@ class WebHelpersTests(unittest.TestCase):
 
         self.assertEqual(selected_ids, ["table_p12_001", "doc_demo_img_p05_001"])
 
+    def test_select_answer_assets_uses_llm_judge_to_filter_cross_modal_noise(self):
+        backend = QueryBackend.__new__(QueryBackend)
+        backend.asset_judge_llm = _CapturingJudgeLLM('{"selected_ids":["doc_demo_img_p48_001"]}')
+        retrieval = {
+            "text_results": [],
+            "image_results": [
+                _FakeNode(
+                    score=0.6721,
+                    metadata={
+                        "type": "image_description",
+                        "image_id": "doc_demo_img_p48_001",
+                        "summary": "关键不良处理流程图",
+                        "detailed_description": "关键不良发生后，先停线并通知工程，再做原因分析与 MRB 处理。",
+                        "page_no": 48,
+                    },
+                )
+            ],
+            "table_results": [
+                _FakeNode(
+                    score=0.6496,
+                    metadata={
+                        "type": "table_block",
+                        "table_id": "table_p80_001",
+                        "caption": "关键失效项目矩阵",
+                        "semantic_summary": "该表列出了多个工艺段的关键失效项目。",
+                        "headers": ["Process", "Critical failure items"],
+                        "normalized_table_text": (
+                            "页码：80；列=Process|Critical failure items；"
+                            "行1=Process control|Wrong material；"
+                            "行2=D/B|Chip crack"
+                        ),
+                        "page_no": 80,
+                    },
+                )
+            ],
+        }
+
+        selected = QueryBackend.select_answer_assets(
+            backend,
+            retrieval,
+            query="关键不良处理流程（flow图）",
+        )
+
+        self.assertEqual(
+            [node.metadata.get("image_id") or node.metadata.get("table_id") for node in selected],
+            ["doc_demo_img_p48_001"],
+        )
+        self.assertIn("关键不良处理流程（flow图）", backend.asset_judge_llm.prompts[0])
+        self.assertIn("关键失效项目矩阵", backend.asset_judge_llm.prompts[0])
+
     def test_build_answer_prompt_uses_human_readable_asset_names(self):
         backend = QueryBackend.__new__(QueryBackend)
         retrieval = {
@@ -645,6 +760,51 @@ class WebHelpersTests(unittest.TestCase):
         self.assertNotIn("doc_demo_img_p19_001", prompt)
         self.assertIn("如果输出思考过程，也请全程使用中文", prompt)
 
+    def test_build_answer_prompt_only_includes_judged_image_and_table_context(self):
+        backend = QueryBackend.__new__(QueryBackend)
+        image_node = _FakeNode(
+            score=0.82,
+            metadata={
+                "type": "image_description",
+                "image_id": "doc_demo_img_p48_001",
+                "summary": "关键不良处理流程图",
+                "page_no": 48,
+                "page_label": "48",
+            },
+        )
+        table_node = _FakeNode(
+            score=0.79,
+            metadata={
+                "type": "table_block",
+                "table_id": "table_p80_001",
+                "caption": "关键失效项目矩阵",
+                "semantic_summary": "该表列出了多个工艺段的关键失效项目。",
+                "headers": ["Process", "Critical failure items"],
+                "normalized_table_text": (
+                    "页码：80；列=Process|Critical failure items；"
+                    "行1=Process control|Wrong material"
+                ),
+                "page_no": 80,
+                "page_label": "80",
+            },
+        )
+        retrieval = {
+            "text_results": [],
+            "image_results": [image_node],
+            "table_results": [table_node],
+        }
+
+        prompt = QueryBackend.build_answer_prompt(
+            backend,
+            query="关键不良处理流程（flow图）",
+            retrieval=retrieval,
+            answer_assets=[image_node],
+        )
+
+        self.assertIn("名称=关键不良处理流程图", prompt)
+        self.assertNotIn("标题=关键失效项目矩阵", prompt)
+        self.assertNotIn("该表列出了多个工艺段的关键失效项目。", prompt)
+
     def test_build_answer_prompt_uses_compact_table_context_instead_of_full_raw_table(self):
         backend = QueryBackend.__new__(QueryBackend)
         raw_table = (
@@ -691,6 +851,35 @@ class WebHelpersTests(unittest.TestCase):
         self.assertIn("列名=名称|设置范围", prompt)
         self.assertIn("示例行1=当心中毒|使用有毒物品作业场所", prompt)
         self.assertNotIn(raw_table, prompt)
+
+    def test_build_answer_prompt_requests_mermaid_for_flowchart_queries(self):
+        backend = QueryBackend.__new__(QueryBackend)
+        image_node = _FakeNode(
+            score=0.91,
+            metadata={
+                "type": "image_description",
+                "image_id": "doc_demo_img_p59_001",
+                "summary": "低良率不合格处理流程图",
+                "page_no": 59,
+                "page_label": "59",
+            },
+        )
+        retrieval = {
+            "text_results": [],
+            "image_results": [image_node],
+            "table_results": [],
+        }
+
+        prompt = QueryBackend.build_answer_prompt(
+            backend,
+            query="低良率不合格处理流程单（flow图）",
+            retrieval=retrieval,
+            answer_assets=[image_node],
+        )
+
+        self.assertIn("如果问题涉及流程图", prompt)
+        self.assertIn("```mermaid", prompt)
+        self.assertIn("先输出文字说明", prompt)
 
     def test_retrieve_once_reuses_one_query_embedding_for_all_branches(self):
         backend = QueryBackend.__new__(QueryBackend)
@@ -835,6 +1024,21 @@ class WebHelpersTests(unittest.TestCase):
         self.assertIn("<td>圆环加斜线</td>", rendered)
         self.assertIn("<td>警告</td>", rendered)
 
+    def test_render_answer_markdown_html_supports_mermaid_code_blocks(self):
+        markdown = (
+            "流程如下：\n\n"
+            "```mermaid\n"
+            "flowchart TD\n"
+            "A[开始] --> B[复测]\n"
+            "```\n"
+        )
+
+        rendered = render_answer_markdown_html(markdown)
+
+        self.assertIn('<pre class="mermaid">', rendered)
+        self.assertIn("flowchart TD", rendered)
+        self.assertIn("A[开始] --&gt; B[复测]", rendered)
+
 
 class WebAppTests(unittest.TestCase):
     def test_frontend_template_prioritizes_ai_answer(self):
@@ -859,6 +1063,82 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("等待模型首个 token", html)
         self.assertIn("payload.answer_html || renderAnswerMarkdown(streamedAnswer)", html)
 
+    def test_stream_answer_uses_multimodal_llm_for_selected_image_assets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "flow.png"
+            image_path.write_bytes(b"fake-image-bytes")
+
+            backend = QueryBackend.__new__(QueryBackend)
+            backend.llm = _CapturingTextLLM(text="文本路径")
+            backend.multimodal_llm = _CapturingMultimodalLLM(text="图片路径")
+            backend.asset_judge_llm = None
+            backend._embedding_cache = {}
+            image_node = _FakeNode(
+                score=0.92,
+                metadata={
+                    "type": "image_description",
+                    "image_id": "doc_demo_img_p93_001",
+                    "summary": "Non-Conformance Lot Management Flowchart",
+                    "page_no": 93,
+                    "page_label": "93",
+                    "image_path": str(image_path),
+                },
+            )
+
+            result = QueryBackend.stream_answer(
+                backend,
+                query="Non-Conformance Lot Management Flowchart能帮我具体讲解一下这个图吗？",
+                retrieval={
+                    "text_results": [],
+                    "image_results": [image_node],
+                    "table_results": [],
+                },
+            )
+
+            chunks = list(result["stream"])
+
+        self.assertEqual("".join(chunk.text for chunk in chunks), "图片路径")
+        self.assertEqual(len(backend.multimodal_llm.stream_calls), 1)
+        self.assertEqual(
+            backend.multimodal_llm.stream_calls[0]["image_paths"],
+            [str(image_path)],
+        )
+        self.assertEqual(backend.llm.stream_prompts, [])
+
+    def test_answer_keeps_text_only_path_for_table_assets(self):
+        backend = QueryBackend.__new__(QueryBackend)
+        backend.llm = _CapturingTextLLM(text="表格回答")
+        backend.multimodal_llm = _CapturingMultimodalLLM(text="不该走图片")
+        backend.asset_judge_llm = None
+        backend._embedding_cache = {}
+        table_node = _FakeNode(
+            score=0.88,
+            metadata={
+                "type": "table_block",
+                "table_id": "table_p80_001",
+                "caption": "质量升级矩阵",
+                "semantic_summary": "该表描述了质量升级矩阵的触发条件。",
+                "headers": ["Level", "Condition"],
+                "normalized_table_text": "页码：80；列=Level|Condition；行1=L1|Minor issue",
+                "page_no": 80,
+                "page_label": "80",
+            },
+        )
+
+        result = QueryBackend.answer(
+            backend,
+            query="质量升级矩阵（表格）",
+            retrieval={
+                "text_results": [],
+                "image_results": [],
+                "table_results": [table_node],
+            },
+        )
+
+        self.assertEqual(result["answer"], "表格回答")
+        self.assertEqual(len(backend.multimodal_llm.complete_calls), 0)
+        self.assertEqual(len(backend.llm.complete_prompts), 1)
+
     def test_query_endpoint_returns_structured_results(self):
         with patch("complex_document_rag.web_app.get_query_backend", return_value=_FakeBackend()):
             client = TestClient(app)
@@ -875,7 +1155,10 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(len(payload["retrieval"]["text_results"]), 1)
         self.assertEqual(len(payload["retrieval"]["image_results"]), 1)
         self.assertEqual(len(payload["retrieval"]["table_results"]), 1)
-        self.assertEqual(payload["retrieval"]["image_results"][0]["image_url"], "")
+        self.assertEqual(
+            payload["retrieval"]["image_results"][0]["image_url"],
+            "/artifacts/doc_demo/images/img_p12_001.png",
+        )
         self.assertEqual(payload["answer_sources"][1]["kind"], "image")
         self.assertEqual(len(payload["answer_assets"]), 2)
         self.assertEqual(payload["answer_assets"][0]["kind"], "table")
@@ -1163,11 +1446,17 @@ class WebAppTests(unittest.TestCase):
                 backend = QueryBackend()
 
         self.assertIsNotNone(backend)
-        mock_create_text_llm.assert_called_once()
+        self.assertEqual(mock_create_text_llm.call_count, 2)
         self.assertEqual(
-            mock_create_text_llm.call_args.kwargs["model_name"],
+            mock_create_text_llm.call_args_list[0].kwargs["model_name"],
             web_app_module.WEB_ANSWER_LLM_MODEL,
         )
+        self.assertFalse(mock_create_text_llm.call_args_list[0].kwargs["disable_thinking"])
+        self.assertEqual(
+            mock_create_text_llm.call_args_list[1].kwargs["model_name"],
+            web_app_module.ASSET_JUDGE_MODEL,
+        )
+        self.assertTrue(mock_create_text_llm.call_args_list[1].kwargs["disable_thinking"])
 
 
 if __name__ == "__main__":

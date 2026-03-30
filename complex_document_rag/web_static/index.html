@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RAG 知识库</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <style>
       :root {
         --bg: #f5f4ef;
@@ -304,6 +305,26 @@
       .answer-body strong { font-weight: 700; }
       .answer-body em { font-style: italic; }
       .answer-body code { padding: 2px 6px; border-radius: 5px; background: rgba(26,26,23,0.07); font-size: 0.88em; font-family: "SF Mono", "Fira Code", monospace; }
+      .answer-body pre {
+        margin: 0 0 12px;
+        padding: 12px 14px;
+        overflow-x: auto;
+        border-radius: 10px;
+        border: 1px solid rgba(26,26,23,0.08);
+        background: #f8f7f3;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .answer-body pre code {
+        padding: 0;
+        background: transparent;
+        border-radius: 0;
+        font-size: inherit;
+      }
+      .answer-body pre.mermaid {
+        padding: 8px;
+        background: #fff;
+      }
       .reasoning-panel {
         margin-bottom: 12px;
         padding: 12px 14px;
@@ -668,7 +689,7 @@
           <div class="msg msg-ai">
             <div class="ai-icon">✦</div>
             <div class="ai-content">
-              <details id="reasoningPanel" class="reasoning-panel" hidden open>
+              <details id="reasoningPanel" class="reasoning-panel" hidden>
                 <summary class="reasoning-label">模型思考过程</summary>
                 <div id="reasoningBox" class="reasoning-body"></div>
               </details>
@@ -890,13 +911,13 @@
       document.getElementById("newChatBtn").addEventListener("click", () => {
         welcomeState.style.display = "flex";
         messagesArea.style.display = "none";
-        shouldAutoScroll = true;
+        shouldAutoScroll = false;
         queryInput.value = "";
         autoResize();
         answerBox.innerHTML = "";
         answerBox.classList.remove("is-streaming");
         reasoningPanel.hidden = true;
-        reasoningPanel.open = true;
+        reasoningPanel.open = false;
         reasoningBox.textContent = "";
         answerAssets.innerHTML = "";
         answerError.hidden = true;
@@ -1001,31 +1022,93 @@
         const text = String(value ?? "").trim();
         if (!text) return `<p>本次未生成回答，请展开下方证据面板查看召回结果。</p>`;
 
-        return text
-          .split(/\n\s*\n/)
-          .map((block) => block.trim())
-          .filter(Boolean)
-          .map((block) => {
-            const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
-            if (!lines.length) return "";
+        const lines = text.split("\n");
+        const parts = [];
+        let index = 0;
 
-            if (lines.every((l) => /^[-*]\s+/.test(l))) {
-              return `<ul>${lines.map((l) => `<li>${inlineMd(l.replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
+        while (index < lines.length) {
+          const rawLine = lines[index] ?? "";
+          const stripped = rawLine.trim();
+          if (!stripped) {
+            index += 1;
+            continue;
+          }
+
+          if (stripped.startsWith("```")) {
+            const fenceLang = stripped.slice(3).trim().toLowerCase();
+            index += 1;
+            const codeLines = [];
+            while (index < lines.length && !String(lines[index] ?? "").trim().startsWith("```")) {
+              codeLines.push(String(lines[index] ?? "").replace(/\s+$/, ""));
+              index += 1;
             }
-
-            if (lines.every((l) => /^\d+\.\s+/.test(l))) {
-              return `<ol>${lines.map((l) => `<li>${inlineMd(l.replace(/^\d+\.\s+/, ""))}</li>`).join("")}</ol>`;
+            if (index < lines.length && String(lines[index] ?? "").trim().startsWith("```")) {
+              index += 1;
             }
-
-            if (/^#{1,3}\s+/.test(lines[0])) {
-              const heading = inlineMd(lines[0].replace(/^#{1,3}\s+/, ""));
-              const rest = lines.slice(1).map((l) => `<p>${inlineMd(l)}</p>`).join("");
-              return `<h3>${heading}</h3>${rest}`;
+            const codeContent = escapeHtml(codeLines.join("\n"));
+            if (fenceLang === "mermaid") {
+              parts.push(`<pre class="mermaid">${codeContent}</pre>`);
+            } else {
+              parts.push(`<pre><code>${codeContent}</code></pre>`);
             }
+            continue;
+          }
 
-            return `<p>${inlineMd(lines.join(" "))}</p>`;
-          })
-          .join("");
+          const blockLines = [];
+          while (index < lines.length) {
+            const candidate = String(lines[index] ?? "");
+            const candidateTrimmed = candidate.trim();
+            if (!candidateTrimmed) {
+              index += 1;
+              break;
+            }
+            if (candidateTrimmed.startsWith("```")) {
+              break;
+            }
+            blockLines.push(candidateTrimmed);
+            index += 1;
+          }
+
+          if (!blockLines.length) continue;
+
+          if (blockLines.every((l) => /^[-*]\s+/.test(l))) {
+            parts.push(`<ul>${blockLines.map((l) => `<li>${inlineMd(l.replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`);
+            continue;
+          }
+
+          if (blockLines.every((l) => /^\d+\.\s+/.test(l))) {
+            parts.push(`<ol>${blockLines.map((l) => `<li>${inlineMd(l.replace(/^\d+\.\s+/, ""))}</li>`).join("")}</ol>`);
+            continue;
+          }
+
+          if (/^#{1,3}\s+/.test(blockLines[0])) {
+            const heading = inlineMd(blockLines[0].replace(/^#{1,3}\s+/, ""));
+            const rest = blockLines.slice(1).map((l) => `<p>${inlineMd(l)}</p>`).join("");
+            parts.push(`<h3>${heading}</h3>${rest}`);
+            continue;
+          }
+
+          parts.push(`<p>${inlineMd(blockLines.join(" "))}</p>`);
+        }
+
+        return parts.join("");
+      }
+
+      let mermaidInitialized = false;
+
+      async function renderMermaidDiagrams(root) {
+        if (!root || !window.mermaid) return;
+        if (!mermaidInitialized) {
+          mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+          mermaidInitialized = true;
+        }
+        const blocks = Array.from(answerBox.querySelectorAll("pre.mermaid"))
+          .filter((block) => !block.dataset.mermaidRendered);
+        if (!blocks.length) return;
+        blocks.forEach((block) => {
+          block.dataset.mermaidRendered = "true";
+        });
+        await mermaid.run({ nodes: blocks });
       }
 
       function renderInlineMarkdown(value) {
@@ -1201,8 +1284,7 @@
         if (isRequestInFlight) return;
 
         const query = queryInput.value.trim();
-        const isNewConversation = messagesArea.style.display === "none";
-        const shouldFollowNewResponse = isNewConversation ? true : isNearBottom();
+        const shouldFollowNewResponse = messagesArea.style.display !== "none" && isNearBottom();
         const requestAbortController = new AbortController();
         let streamedAnswer = "";
         console.log("[runQuery] called, query length:", query.length);
@@ -1228,7 +1310,7 @@
           answerBox.innerHTML = `<div class="loading-dots"><span></span><span></span><span></span></div>`;
           answerBox.classList.remove("is-streaming");
           reasoningPanel.hidden = true;
-          reasoningPanel.open = true;
+          reasoningPanel.open = false;
           reasoningBox.textContent = "";
           answerAssets.innerHTML = "";
           answerSources.innerHTML = "";
@@ -1250,6 +1332,7 @@
             if (!response.ok) throw new Error(payload.detail || "查询失败");
 
             answerBox.innerHTML = payload.answer_html || renderAnswerMarkdown(payload.answer);
+            renderMermaidDiagrams(answerBox).catch(() => {});
             answerAssets.innerHTML = renderAnswerAssets(payload.answer_assets || []);
             renderAnswerSources(payload.answer_sources || []);
             textResults.innerHTML = renderTextCards(payload.retrieval?.text_results || []);
@@ -1322,6 +1405,7 @@
               }
               streamedAnswer += payload.delta || "";
               answerBox.innerHTML = renderAnswerMarkdown(streamedAnswer);
+              renderMermaidDiagrams(answerBox).catch(() => {});
               answerBox.classList.add("is-streaming");
               requestStatus.textContent = "回答生成中…";
               scrollChatToBottom();
@@ -1341,6 +1425,7 @@
             if (eventName === "done") {
               streamedAnswer = payload.answer || streamedAnswer;
               answerBox.innerHTML = payload.answer_html || renderAnswerMarkdown(streamedAnswer);
+              renderMermaidDiagrams(answerBox).catch(() => {});
               answerBox.classList.remove("is-streaming");
               answerAssets.innerHTML = renderAnswerAssets(payload.answer_assets || []);
               renderAnswerSources(payload.answer_sources || []);

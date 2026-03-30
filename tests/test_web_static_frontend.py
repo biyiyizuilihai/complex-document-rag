@@ -79,10 +79,10 @@ class WebStaticFrontendTestCase(unittest.TestCase):
         reasoning_rule = self._css_rule(html, ".reasoning-body")
         self.assertIn("font-style: italic", reasoning_rule)
 
-        self.assertIn('<details id="reasoningPanel" class="reasoning-panel" hidden open>', html)
+        self.assertIn('<details id="reasoningPanel" class="reasoning-panel" hidden>', html)
         self.assertIn('<summary class="reasoning-label">模型思考过程</summary>', html)
         self.assertLess(html.index('id="reasoningPanel"'), html.index('id="answerBox"'))
-        self.assertIn("reasoningPanel.open = true;", html)
+        self.assertIn("reasoningPanel.open = false;", html)
 
     def test_jump_to_bottom_button_is_available_when_user_leaves_bottom(self):
         html = self._load_html()
@@ -101,8 +101,8 @@ class WebStaticFrontendTestCase(unittest.TestCase):
     def test_submit_does_not_force_scroll_and_preserves_current_view_preference(self):
         html = self._load_html()
 
-        self.assertIn('const isNewConversation = messagesArea.style.display === "none";', html)
-        self.assertIn("const shouldFollowNewResponse = isNewConversation ? true : isNearBottom();", html)
+        self.assertNotIn('const isNewConversation = messagesArea.style.display === "none";', html)
+        self.assertIn('const shouldFollowNewResponse = messagesArea.style.display !== "none" && isNearBottom();', html)
         self.assertIn("shouldAutoScroll = shouldFollowNewResponse;", html)
         self.assertNotIn('setTimeout(() => scrollChatToBottom("smooth", true), 50);', html)
 
@@ -138,6 +138,15 @@ class WebStaticFrontendTestCase(unittest.TestCase):
         self.assertIn("currentRequestAbortController?.abort();", html)
         self.assertIn("signal: requestAbortController.signal", html)
         self.assertIn("requestStatus.textContent = \"已停止\";", html)
+
+    def test_mermaid_blocks_are_supported_in_answers(self):
+        html = self._load_html()
+
+        self.assertIn("https://cdn.jsdelivr.net/npm/mermaid", html)
+        self.assertIn("function renderMermaidDiagrams", html)
+        self.assertIn('answerBox.querySelectorAll("pre.mermaid")', html)
+        self.assertIn("await mermaid.run", html)
+        self.assertIn("renderMermaidDiagrams(answerBox)", html)
 
 
 if __name__ == "__main__":

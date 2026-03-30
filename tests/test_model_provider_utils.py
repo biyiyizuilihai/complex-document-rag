@@ -1,9 +1,11 @@
+import tempfile
 import unittest
 from requests.exceptions import SSLError
 from unittest.mock import patch
 
 from model_provider_utils import (
     RetryingEmbedding,
+    create_multimodal_llm,
     create_text_llm,
     should_use_dashscope_embedding,
     should_use_dashscope_llm,
@@ -172,6 +174,39 @@ class ModelProviderUtilsTests(unittest.TestCase):
         self.assertEqual(chunks[0].additional_kwargs["reasoning_delta"], "Thinking")
         self.assertIsNone(chunks[0].delta)
         self.assertEqual(chunks[1].delta, "答案")
+
+    def test_multimodal_stream_complete_embeds_local_images(self):
+        captured_kwargs = {}
+
+        class _FakeOpenAIClient:
+            def __init__(self, *args, **kwargs):
+                self.chat = self
+                self.completions = self
+
+            def create(self, **kwargs):
+                captured_kwargs.update(kwargs)
+                return iter([ModelProviderUtilsTests._FakeChunk(content="图像回答")])
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as image_file:
+            image_file.write(b"fake-image")
+            image_file.flush()
+
+            with patch("model_provider_utils.OpenAIClient", _FakeOpenAIClient):
+                llm = create_multimodal_llm(
+                    model_name="gpt-4o",
+                    api_key="dummy",
+                    api_base="https://api.openai.com/v1",
+                )
+
+                chunks = list(llm.stream_complete("请解释这张图", image_paths=[image_file.name]))
+
+        self.assertEqual(chunks[0].delta, "图像回答")
+        self.assertEqual(captured_kwargs["messages"][0]["role"], "user")
+        self.assertEqual(captured_kwargs["messages"][0]["content"][0]["type"], "text")
+        self.assertEqual(captured_kwargs["messages"][0]["content"][1]["type"], "image_url")
+        self.assertTrue(
+            captured_kwargs["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+        )
 
 
 if __name__ == "__main__":

@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Optional
+import mimetypes
 import os
 import time
 
@@ -52,6 +54,39 @@ except ImportError:
 
 
 if OpenAIClient is not None and CompletionResponse is not None and LLMMetadata is not None:
+
+    def _local_image_path_to_data_url(path: str) -> str:
+        normalized_path = os.path.abspath(path)
+        mime_type, _ = mimetypes.guess_type(normalized_path)
+        if not mime_type:
+            mime_type = "image/png"
+        with open(normalized_path, "rb") as handle:
+            encoded = base64.b64encode(handle.read()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    def _build_multimodal_user_content(
+        prompt: str,
+        *,
+        image_paths: Optional[list[str]] = None,
+        image_urls: Optional[list[str]] = None,
+    ) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for url in image_urls or []:
+            normalized_url = str(url or "").strip()
+            if not normalized_url:
+                continue
+            content.append({"type": "image_url", "image_url": {"url": normalized_url}})
+        for path in image_paths or []:
+            normalized_path = str(path or "").strip()
+            if not normalized_path:
+                continue
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _local_image_path_to_data_url(normalized_path)},
+                }
+            )
+        return content
 
     class OpenAICompatibleLLM(CustomLLM):
         """使用 OpenAI 兼容接口的轻量 LlamaIndex LLM 封装。"""
@@ -169,6 +204,154 @@ if OpenAIClient is not None and CompletionResponse is not None and LLMMetadata i
 
             return gen()
 
+    class OpenAICompatibleMultimodalLLM(CustomLLM):
+        """支持 text + image_url 输入的 OpenAI 兼容多模态封装。"""
+
+        model_name: str = ""
+        api_key: str = ""
+        api_base: Optional[str] = None
+        max_tokens: Optional[int] = 1024
+        temperature: float = 0.1
+        additional_request_kwargs: dict[str, Any] = {}
+        _client: Any = PrivateAttr()
+
+        def __init__(
+            self,
+            model_name: str,
+            api_key: str,
+            api_base: Optional[str] = None,
+            max_tokens: Optional[int] = 1024,
+            temperature: float = 0.1,
+            additional_request_kwargs: Optional[dict[str, Any]] = None,
+            callback_manager: Optional[CallbackManager] = None,
+            system_prompt: Optional[str] = None,
+        ) -> None:
+            super().__init__(
+                model_name=model_name,
+                api_key=api_key,
+                api_base=api_base,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                additional_request_kwargs=dict(additional_request_kwargs or {}),
+                callback_manager=callback_manager or CallbackManager([]),
+                system_prompt=system_prompt,
+                pydantic_program_mode=PydanticProgramMode.DEFAULT,
+            )
+            self.model_name = model_name
+            self.api_key = api_key
+            self.api_base = api_base
+            self.max_tokens = max_tokens
+            self.temperature = temperature
+            self.additional_request_kwargs = dict(additional_request_kwargs or {})
+            self._client = OpenAIClient(api_key=api_key, base_url=api_base)
+
+        @classmethod
+        def class_name(cls) -> str:
+            return "OpenAICompatibleMultimodalLLM"
+
+        @property
+        def metadata(self) -> LLMMetadata:
+            return LLMMetadata(
+                context_window=131072,
+                num_output=self.max_tokens or -1,
+                is_chat_model=False,
+                model_name=self.model_name,
+            )
+
+        def _build_messages(
+            self,
+            prompt: str,
+            *,
+            image_paths: Optional[list[str]] = None,
+            image_urls: Optional[list[str]] = None,
+        ) -> list[dict[str, Any]]:
+            messages = []
+            if getattr(self, "system_prompt", None):
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _build_multimodal_user_content(
+                        prompt,
+                        image_paths=image_paths,
+                        image_urls=image_urls,
+                    ),
+                }
+            )
+            return messages
+
+        def complete(
+            self,
+            prompt: str,
+            formatted: bool = False,
+            *,
+            image_paths: Optional[list[str]] = None,
+            image_urls: Optional[list[str]] = None,
+            **kwargs: Any,
+        ) -> CompletionResponse:
+            request_kwargs = {
+                "model": self.model_name,
+                "messages": self._build_messages(
+                    prompt,
+                    image_paths=image_paths,
+                    image_urls=image_urls,
+                ),
+                "temperature": kwargs.get("temperature", self.temperature),
+            }
+            max_tokens = kwargs.get("max_tokens", self.max_tokens)
+            if max_tokens is not None:
+                request_kwargs["max_tokens"] = max_tokens
+            request_kwargs.update(self.additional_request_kwargs)
+
+            response = self._client.chat.completions.create(**request_kwargs)
+            text = response.choices[0].message.content or ""
+            return CompletionResponse(text=text, raw=response)
+
+        def stream_complete(
+            self,
+            prompt: str,
+            formatted: bool = False,
+            *,
+            image_paths: Optional[list[str]] = None,
+            image_urls: Optional[list[str]] = None,
+            **kwargs: Any,
+        ) -> CompletionResponseGen:
+            request_kwargs = {
+                "model": self.model_name,
+                "messages": self._build_messages(
+                    prompt,
+                    image_paths=image_paths,
+                    image_urls=image_urls,
+                ),
+                "temperature": kwargs.get("temperature", self.temperature),
+                "stream": True,
+            }
+            max_tokens = kwargs.get("max_tokens", self.max_tokens)
+            if max_tokens is not None:
+                request_kwargs["max_tokens"] = max_tokens
+            request_kwargs.update(self.additional_request_kwargs)
+
+            stream = self._client.chat.completions.create(**request_kwargs)
+
+            def gen() -> CompletionResponseGen:
+                for chunk in stream:
+                    delta = chunk.choices[0].delta
+                    delta_text = getattr(delta, "content", None) or ""
+                    reasoning_text = getattr(delta, "reasoning_content", None) or ""
+                    if not delta_text and not reasoning_text:
+                        continue
+                    additional_kwargs: dict[str, Any] = {}
+                    if reasoning_text:
+                        additional_kwargs["reasoning_delta"] = reasoning_text
+                    yield CompletionResponse(
+                        text=delta_text or "",
+                        delta=delta_text or None,
+                        raw=chunk,
+                        additional_kwargs=additional_kwargs,
+                    )
+
+            return gen()
+
 else:
 
     class OpenAICompatibleLLM:  # type: ignore[no-redef]
@@ -193,6 +376,9 @@ else:
             self.additional_request_kwargs = dict(additional_request_kwargs or {})
             self.callback_manager = callback_manager
             self.system_prompt = system_prompt
+
+    class OpenAICompatibleMultimodalLLM(OpenAICompatibleLLM):  # type: ignore[no-redef]
+        pass
 
 
 RETRYABLE_EMBEDDING_ERROR_MARKERS = (
@@ -369,4 +555,22 @@ def create_text_llm(
         model=model_name,
         api_key=api_key,
         api_base=api_base,
+    )
+
+
+def create_multimodal_llm(
+    model_name: str,
+    api_key: str,
+    api_base: str | None = None,
+    *,
+    disable_thinking: bool = False,
+):
+    additional_request_kwargs: dict[str, Any] = {}
+    if disable_thinking and should_use_dashscope_llm(model_name=model_name, api_base=api_base):
+        additional_request_kwargs["extra_body"] = {"enable_thinking": False}
+    return OpenAICompatibleMultimodalLLM(
+        model_name=model_name,
+        api_key=api_key,
+        api_base=api_base,
+        additional_request_kwargs=additional_request_kwargs,
     )
