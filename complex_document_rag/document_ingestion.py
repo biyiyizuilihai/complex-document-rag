@@ -562,6 +562,7 @@ def build_pdf_ocr_image_descriptions(
 ) -> dict[str, dict[str, object]]:
     ocr_dir = Path(ocr_doc_dir)
     project_root = os.path.realpath(project_root)
+    source_path = os.path.abspath(source_path)
     page_labels = page_labels or {}
     images_root = Path(images_dir) if images_dir else (ocr_dir / "images")
     descriptions: dict[str, dict[str, object]] = {}
@@ -607,6 +608,8 @@ def build_pdf_ocr_image_descriptions(
                 "source_image_path": os.path.relpath(str(abs_image_path), project_root),
                 "source_image_filename": image_filename,
                 "doc_id": doc_id,
+                "source_doc_id": doc_id,
+                "source_path": source_path,
                 "source_document_path": source_path,
                 "page_no": page_no,
                 "page_label": page_label,

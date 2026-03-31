@@ -144,9 +144,20 @@ class WebStaticFrontendTestCase(unittest.TestCase):
 
         self.assertIn("https://cdn.jsdelivr.net/npm/mermaid", html)
         self.assertIn("function renderMermaidDiagrams", html)
-        self.assertIn('answerBox.querySelectorAll("pre.mermaid")', html)
+        self.assertIn('querySelectorAll("pre.mermaid")', html)
         self.assertIn("await mermaid.run", html)
         self.assertIn("renderMermaidDiagrams(answerBox)", html)
+
+    def test_frontend_tracks_conversation_history_and_sends_history_payload(self):
+        html = self._load_html()
+
+        self.assertIn('id="conversationHistory"', html)
+        self.assertIn("const completedConversationTurns = [];", html)
+        self.assertIn("function buildConversationHistoryPayload()", html)
+        self.assertIn("history: buildConversationHistoryPayload()", html)
+        self.assertIn("function renderConversationHistory()", html)
+        self.assertIn("completedConversationTurns.push({", html)
+        self.assertIn("completedConversationTurns.length = 0;", html)
 
 
 if __name__ == "__main__":

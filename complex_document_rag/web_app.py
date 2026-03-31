@@ -32,6 +32,9 @@ from config import (
     MULTIMODAL_LLM_MODEL,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
+    QDRANT_IMAGE_COLLECTION,
+    QDRANT_TABLE_COLLECTION,
+    QDRANT_TEXT_COLLECTION,
     RERANK_API_BASE,
     RERANK_API_KEY,
     RERANK_ENABLED,
@@ -48,7 +51,11 @@ from config import (
 )
 from model_provider_utils import create_multimodal_llm, create_text_llm
 from complex_document_rag.document_ingestion import sanitize_doc_id
-from complex_document_rag.qdrant_management import create_qdrant_client, delete_doc_vectors
+from complex_document_rag.qdrant_management import (
+    count_doc_vectors,
+    create_qdrant_client,
+    delete_doc_vectors,
+)
 from complex_document_rag.reranker import SiliconFlowReranker, rerank_retrieval_bundle
 from complex_document_rag.step0_document_ingestion import ingest_document
 from complex_document_rag.web_helpers import (
@@ -94,6 +101,9 @@ TABLE_SUMMARY_CHAR_LIMIT = 220
 TABLE_PREVIEW_ROW_LIMIT = 3
 TABLE_PREVIEW_ROW_CHAR_LIMIT = 220
 ANSWER_IMAGE_INPUT_TOP_K = max(1, int(os.getenv("ANSWER_IMAGE_INPUT_TOP_K", "1")))
+HISTORY_TURN_LIMIT = max(1, int(os.getenv("HISTORY_TURN_LIMIT", "6")))
+HISTORY_QUERY_CHAR_LIMIT = max(80, int(os.getenv("HISTORY_QUERY_CHAR_LIMIT", "240")))
+HISTORY_ANSWER_CHAR_LIMIT = max(120, int(os.getenv("HISTORY_ANSWER_CHAR_LIMIT", "420")))
 RERANK_CONFIDENCE_FLOOR = 0.2
 QUERY_EXPANSION_SCORE_PENALTY = 0.02
 RERANKED_BRANCH_KEYS = ("text_results",)
@@ -107,9 +117,15 @@ logging.basicConfig(
 LOGGER = logging.getLogger("rag.timing")
 
 
+class ConversationTurn(BaseModel):
+    query: str = Field(..., min_length=1, description="历史用户问题")
+    answer: str = Field(default="", description="历史助手回答")
+
+
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, description="用户问题")
     generate_answer: bool = Field(default=True, description="是否生成最终回答")
+    history: list[ConversationTurn] = Field(default_factory=list, description="最近几轮对话历史")
 
 
 def _utc_now_iso() -> str:
@@ -131,6 +147,11 @@ def _public_ingest_job_payload(job: dict[str, Any]) -> dict[str, Any]:
         "error",
         "doc_id",
         "output_dir",
+        "index_status",
+        "index_message",
+        "artifact_warnings",
+        "artifact_counts",
+        "index_counts",
     )
     return {key: copy.deepcopy(job.get(key)) for key in visible_keys}
 
@@ -200,6 +221,116 @@ def _refresh_query_backend_after_ingest(job_id: str) -> None:
     _append_ingest_job_log(job_id, "问答后端已刷新，可直接去智能问答页提问。")
 
 
+def _load_json_record_count(path: str) -> int:
+    if not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if isinstance(payload, dict):
+        return len(payload)
+    if isinstance(payload, list):
+        return len(payload)
+    return 0
+
+
+def _load_ingest_artifact_counts(output_dir: str) -> dict[str, int]:
+    manifest_path = os.path.join(output_dir, "manifest.json")
+    manifest: dict[str, Any] = {}
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle) or {}
+    return {
+        "text_blocks": len(manifest.get("text_blocks") or []),
+        "image_files": len(manifest.get("image_blocks") or []),
+        "image_descriptions": _load_json_record_count(os.path.join(output_dir, "image_descriptions.json")),
+        "table_blocks": _load_json_record_count(os.path.join(output_dir, "table_blocks.json")),
+    }
+
+
+def _compute_ingest_index_status(
+    doc_id: str,
+    output_dir: str,
+    source_path: str,
+    *,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    artifact_counts = _load_ingest_artifact_counts(output_dir)
+    qdrant_client = client or create_qdrant_client()
+    index_counts = {
+        "text_chunks": count_doc_vectors(
+            qdrant_client,
+            QDRANT_TEXT_COLLECTION,
+            doc_id=doc_id,
+            source_path=source_path,
+        ),
+        "image_descriptions": count_doc_vectors(
+            qdrant_client,
+            QDRANT_IMAGE_COLLECTION,
+            doc_id=doc_id,
+            source_path=source_path,
+        ),
+        "table_blocks": count_doc_vectors(
+            qdrant_client,
+            QDRANT_TABLE_COLLECTION,
+            doc_id=doc_id,
+            source_path=source_path,
+        ),
+    }
+
+    text_expected = artifact_counts["text_blocks"]
+    image_expected = artifact_counts["image_descriptions"]
+    table_expected = artifact_counts["table_blocks"]
+
+    branch_ok = {
+        "text": (text_expected == 0 and index_counts["text_chunks"] == 0)
+        or (text_expected > 0 and index_counts["text_chunks"] > 0),
+        "image": index_counts["image_descriptions"] == image_expected,
+        "table": index_counts["table_blocks"] == table_expected,
+    }
+
+    if all(branch_ok.values()):
+        index_status = "verified"
+    elif any(index_counts.values()):
+        index_status = "partial"
+    else:
+        index_status = "missing"
+
+    artifact_warnings: list[str] = []
+    missing_image_descriptions = artifact_counts["image_files"] - artifact_counts["image_descriptions"]
+    if missing_image_descriptions > 0:
+        artifact_warnings.append(
+            f"检测到 {missing_image_descriptions} 张图片未生成图片描述，这部分图片不会参与图片检索。"
+        )
+
+    branch_fragments = [
+        f"文本块 {text_expected} -> 文本索引 {index_counts['text_chunks']}",
+        (
+            f"图片描述 {image_expected}"
+            + (
+                f" / 图片文件 {artifact_counts['image_files']}"
+                if artifact_counts["image_files"] != image_expected
+                else ""
+            )
+            + f" -> 图片索引 {index_counts['image_descriptions']}"
+        ),
+        f"表格块 {table_expected} -> 表格索引 {index_counts['table_blocks']}",
+    ]
+    status_prefix = {
+        "verified": "索引校验通过",
+        "partial": "索引校验部分异常",
+        "missing": "索引校验失败",
+    }[index_status]
+    index_message = f"{status_prefix}：{'；'.join(branch_fragments)}"
+
+    return {
+        "index_status": index_status,
+        "index_message": index_message,
+        "artifact_warnings": artifact_warnings,
+        "artifact_counts": artifact_counts,
+        "index_counts": index_counts,
+    }
+
+
 def _run_ingest_job(job_id: str) -> None:
     job = _get_ingest_job_or_404(job_id)
     upload_path = str(job.get("upload_path") or "")
@@ -223,7 +354,7 @@ def _run_ingest_job(job_id: str) -> None:
     try:
         try:
             client = create_qdrant_client()
-            delete_doc_vectors(client, doc_id)
+            delete_doc_vectors(client, doc_id, source_path=upload_path)
             _append_ingest_job_log(job_id, f"已清理 doc_id={doc_id} 的旧向量。")
         except Exception as exc:
             _append_ingest_job_log(job_id, f"旧向量清理跳过: {exc}")
@@ -240,6 +371,12 @@ def _run_ingest_job(job_id: str) -> None:
         with contextlib.redirect_stdout(log_writer), contextlib.redirect_stderr(log_writer):
             ingest_document(args)
         log_writer.flush()
+
+        verification = _compute_ingest_index_status(doc_id, output_dir, upload_path)
+        _update_ingest_job(job_id, **verification)
+        _append_ingest_job_log(job_id, verification["index_message"])
+        for warning in verification.get("artifact_warnings", []):
+            _append_ingest_job_log(job_id, f"注意: {warning}")
 
         try:
             _refresh_query_backend_after_ingest(job_id)
@@ -358,6 +495,25 @@ def _truncate_for_prompt(text: str, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: max(0, limit - 1)].rstrip()}…"
+
+
+def _build_history_prompt(history: Iterable[dict[str, Any]] | None) -> str:
+    if not history:
+        return ""
+
+    lines: list[str] = []
+    recent_turns = list(history)[-HISTORY_TURN_LIMIT:]
+    for turn in recent_turns:
+        query = _truncate_for_prompt(str((turn or {}).get("query", "") or ""), HISTORY_QUERY_CHAR_LIMIT)
+        answer = _truncate_for_prompt(str((turn or {}).get("answer", "") or ""), HISTORY_ANSWER_CHAR_LIMIT)
+        if query:
+            lines.append(f"上一轮用户：{query}")
+        if answer:
+            lines.append(f"上一轮助手：{answer}")
+
+    if not lines:
+        return ""
+    return "对话历史：\n" + "\n".join(lines) + "\n\n"
 
 
 def _extract_table_embedded_image_ids(node: Any) -> set[str]:
@@ -1084,6 +1240,7 @@ class QueryBackend:
         query: str,
         retrieval: dict[str, list[Any]],
         answer_assets: list[Any],
+        history: list[dict[str, Any]] | None = None,
     ) -> str:
         text_context = []
         for index, node in enumerate(retrieval.get("text_results", [])[:TEXT_CONTEXT_TOP_K], start=1):
@@ -1134,6 +1291,7 @@ class QueryBackend:
                 "代码块来概括主流程。Mermaid 中只保留关键节点与判断分支，节点名称使用中文；若某条连线或条件无法从证据中确认，"
                 "就在文字说明中明确写出不确定，不要在 Mermaid 中编造。\n"
             )
+        history_context = _build_history_prompt(history)
 
         return (
             "你是一个严谨的 RAG 问答助手。请严格基于给定上下文回答，不要编造。\n"
@@ -1143,7 +1301,8 @@ class QueryBackend:
             "引用图表时只使用中文标题或名称，不要输出任何内部 ID、文件名或技术标识。\n"
             f"{mermaid_instruction}"
             f"推荐随答案一起返回的素材：{', '.join(answer_asset_ids) if answer_asset_ids else '无'}\n\n"
-            f"问题：{query}\n\n"
+            f"{history_context}"
+            f"当前问题：{query}\n\n"
             "文本证据：\n"
             f"{chr(10).join(text_context) or '无'}\n\n"
             "图片证据：\n"
@@ -1212,11 +1371,16 @@ class QueryBackend:
                 LOGGER.warning("[visual  ] multimodal stream fallback to text llm: %s", exc)
         return self.llm.stream_complete(prompt)
 
-    def answer(self, query: str, retrieval: dict[str, list[Any]] | None = None) -> dict[str, Any]:
+    def answer(
+        self,
+        query: str,
+        retrieval: dict[str, list[Any]] | None = None,
+        history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         retrieval = retrieval or self.retrieve(query)
         answer_assets = self.select_answer_assets(retrieval, query=query)
         answer_sources = self.select_answer_sources(retrieval, answer_assets)
-        prompt = self.build_answer_prompt(query, retrieval, answer_assets)
+        prompt = self.build_answer_prompt(query, retrieval, answer_assets, history=history)
         response = self._complete_answer(prompt, answer_assets)
         return {
             "answer": response.text or "",
@@ -1224,11 +1388,16 @@ class QueryBackend:
             "answer_assets": answer_assets,
         }
 
-    def stream_answer(self, query: str, retrieval: dict[str, list[Any]] | None = None):
+    def stream_answer(
+        self,
+        query: str,
+        retrieval: dict[str, list[Any]] | None = None,
+        history: list[dict[str, Any]] | None = None,
+    ):
         retrieval = retrieval or self.retrieve(query)
         answer_assets = self.select_answer_assets(retrieval, query=query)
         answer_sources = self.select_answer_sources(retrieval, answer_assets)
-        prompt = self.build_answer_prompt(query, retrieval, answer_assets)
+        prompt = self.build_answer_prompt(query, retrieval, answer_assets, history=history)
         return {
             "stream": self._stream_answer(prompt, answer_assets),
             "answer_sources": answer_sources,
@@ -1381,6 +1550,11 @@ def create_app() -> FastAPI:
             "error": "",
             "doc_id": "",
             "output_dir": "",
+            "index_status": "pending",
+            "index_message": "",
+            "artifact_warnings": [],
+            "artifact_counts": {},
+            "index_counts": {},
             "upload_path": upload_path,
         }
         _store_ingest_job(job)
@@ -1395,6 +1569,7 @@ def create_app() -> FastAPI:
     @app.post("/api/query")
     def query(payload: QueryRequest) -> dict[str, Any]:
         backend = get_query_backend()
+        history = [turn.model_dump() for turn in payload.history]
         retrieval_error = ""
         retrieval = _empty_retrieval_bundle()
         try:
@@ -1409,7 +1584,7 @@ def create_app() -> FastAPI:
 
         if payload.generate_answer and not retrieval_error:
             try:
-                answer_result = backend.answer(payload.query, retrieval=retrieval)
+                answer_result = backend.answer(payload.query, retrieval=retrieval, history=history)
             except Exception as exc:  # pragma: no cover - exercised via tests with fake backend
                 answer_error = str(exc)
             else:
@@ -1429,6 +1604,7 @@ def create_app() -> FastAPI:
     @app.post("/api/query/stream")
     def stream_query(payload: QueryRequest) -> StreamingResponse:
         backend = get_query_backend()
+        history = [turn.model_dump() for turn in payload.history]
 
         def event_stream():
             t_request = time.perf_counter()
@@ -1483,7 +1659,7 @@ def create_app() -> FastAPI:
                 return
 
             try:
-                stream_result = backend.stream_answer(payload.query, retrieval=retrieval)
+                stream_result = backend.stream_answer(payload.query, retrieval=retrieval, history=history)
             except Exception as exc:
                 yield _sse_event(
                     "retrieval",

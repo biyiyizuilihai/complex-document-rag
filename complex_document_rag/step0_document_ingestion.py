@@ -111,6 +111,7 @@ def attach_text_block_metadata(
     for index, block in enumerate(blocks, start=1):
         merged = dict(block)
         merged["doc_id"] = doc_id
+        merged["source_doc_id"] = doc_id
         merged["source_path"] = os.path.abspath(source_path)
         merged.setdefault("block_id", f"{doc_id}_text_{index:04d}")
         normalized.append(merged)
@@ -126,6 +127,7 @@ def attach_image_block_metadata(
     for index, block in enumerate(blocks, start=1):
         merged = dict(block)
         merged["doc_id"] = doc_id
+        merged["source_doc_id"] = doc_id
         merged["source_path"] = os.path.abspath(source_path)
         merged.setdefault("block_id", f"{doc_id}_image_{index:04d}")
         normalized.append(merged)
@@ -145,6 +147,7 @@ def build_llama_documents(text_blocks: list[dict[str, object]]) -> list[Document
             continue
         metadata = {
             "doc_id": block.get("doc_id", ""),
+            "source_doc_id": block.get("source_doc_id", ""),
             "source_path": block.get("source_path", ""),
             "page_no": block.get("page_no"),
             "page_label": block.get("page_label", ""),
@@ -223,7 +226,7 @@ def prepare_pdf_input(args: argparse.Namespace, input_path: str, work_dir: str, 
         ocr_doc_dir=ocr_doc_dir,
         project_root=PROJECT_ROOT,
         doc_id=doc_id,
-        source_path=relpath_from_project(input_path),
+        source_path=input_path,
         page_labels=page_labels,
         images_dir=standard_images_dir,
     )

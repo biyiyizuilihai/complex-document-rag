@@ -19,6 +19,8 @@ class WebStaticIngestFrontendTestCase(unittest.TestCase):
         self.assertIn('id="workersInput"', html)
         self.assertIn('id="startIngestButton"', html)
         self.assertIn('id="jobLogs"', html)
+        self.assertIn('id="jobIndexStatus"', html)
+        self.assertIn('id="jobIndexSummary"', html)
 
     def test_ingest_page_polls_job_status(self):
         html = self._load_html()

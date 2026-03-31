@@ -112,12 +112,14 @@ def index_single_image(img_id: str, desc_data: dict,
         #   - type: 区分文本和图片结果
         metadata={
             "image_id": img_id,
+            "source_doc_id": desc_data.get("source_doc_id") or desc_data.get("doc_id", ""),
             "image_path": img_path,
             "image_filename": desc_data.get(
                 "source_image_filename", os.path.basename(img_path)
             ),
             "image_rel_path": desc_data.get("source_image_path", ""),
             "doc_id": desc_data.get("doc_id", ""),
+            "source_path": desc_data.get("source_path", ""),
             "source_document_path": desc_data.get("source_document_path", ""),
             "page_no": desc_data.get("page_no"),
             "page_label": desc_data.get("page_label", ""),

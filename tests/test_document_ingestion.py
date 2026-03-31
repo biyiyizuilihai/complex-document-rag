@@ -23,13 +23,71 @@ from complex_document_rag.table_summary import summarize_table_blocks
 try:
     from types import SimpleNamespace
 
-    from complex_document_rag.step0_document_ingestion import ingest_document
+    from complex_document_rag.step0_document_ingestion import build_llama_documents, ingest_document
 except Exception:  # pragma: no cover - 允许在缺少运行依赖时跳过
     SimpleNamespace = None
+    build_llama_documents = None
     ingest_document = None
 
 
 class DocumentIngestionTests(unittest.TestCase):
+    def test_build_llama_documents_preserves_source_doc_id(self):
+        if build_llama_documents is None:
+            self.skipTest("step0_document_ingestion dependencies unavailable")
+
+        documents = build_llama_documents(
+            [
+                {
+                    "content": "demo text",
+                    "doc_id": "doc_demo",
+                    "source_doc_id": "doc_demo",
+                    "source_path": "/tmp/demo.pdf",
+                    "page_no": 1,
+                    "page_label": "1",
+                    "block_type": "text",
+                    "origin": "pdf_ocr",
+                    "block_id": "doc_demo_text_0001",
+                }
+            ]
+        )
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0].metadata["doc_id"], "doc_demo")
+        self.assertEqual(documents[0].metadata["source_doc_id"], "doc_demo")
+
+    def test_build_pdf_ocr_image_descriptions_preserves_absolute_source_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = tmpdir
+            ocr_doc_dir = os.path.join(tmpdir, "demo")
+            images_dir = os.path.join(ocr_doc_dir, "images")
+            os.makedirs(images_dir)
+
+            with open(os.path.join(ocr_doc_dir, "page_0001.md"), "w", encoding="utf-8") as f:
+                f.write("流程说明\n\n![img_p01_001](images/img_p01_001.png)\n")
+            with open(os.path.join(ocr_doc_dir, "page_0001_raw.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "流程说明\n\n"
+                    "```json\n"
+                    '{"regions":[{"id":"img_001","caption":"登录流程图","type":"diagram"}]}'
+                    "\n```"
+                )
+            image_path = os.path.join(images_dir, "img_p01_001.png")
+            open(image_path, "wb").close()
+
+            descriptions = build_pdf_ocr_image_descriptions(
+                ocr_doc_dir=ocr_doc_dir,
+                project_root=project_root,
+                doc_id="doc_demo",
+                source_path="relative/demo.pdf",
+                page_labels={1: "1"},
+                images_dir=images_dir,
+            )
+
+        payload = descriptions["doc_demo_img_p01_001"]
+        self.assertEqual(payload["source_doc_id"], "doc_demo")
+        self.assertTrue(payload["source_path"].endswith(os.path.join("relative", "demo.pdf")))
+        self.assertTrue(payload["source_document_path"].endswith(os.path.join("relative", "demo.pdf")))
+
     def test_markdown_table_from_rows_escapes_cell_content(self):
         markdown = markdown_table_from_rows(
             [

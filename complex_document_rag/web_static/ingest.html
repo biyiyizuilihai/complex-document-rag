@@ -292,6 +292,21 @@
         color: var(--accent);
       }
 
+      .status-pill.is-verified {
+        background: rgba(15, 109, 98, 0.16);
+        color: var(--accent);
+      }
+
+      .status-pill.is-partial {
+        background: rgba(139, 62, 34, 0.12);
+        color: var(--warn);
+      }
+
+      .status-pill.is-missing {
+        background: rgba(139, 62, 34, 0.12);
+        color: var(--warn);
+      }
+
       .status-pill.is-failed {
         background: rgba(139, 62, 34, 0.12);
         color: var(--warn);
@@ -442,7 +457,17 @@
                 <div class="metric-label">输出目录</div>
                 <div id="jobOutputDir" class="metric-value">-</div>
               </div>
+              <div class="metric">
+                <div class="metric-label">索引校验</div>
+                <div id="jobIndexStatus" class="metric-value">待执行</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">索引明细</div>
+                <div id="jobIndexSummary" class="metric-value">-</div>
+              </div>
             </div>
+
+            <div id="jobWarnings" class="empty-state" hidden></div>
 
             <div id="jobEmptyState" class="empty-state">
               还没有任务。上传 PDF 并点击“开始摄入”后，这里会实时刷新日志。
@@ -465,6 +490,9 @@
       const jobDocId = document.getElementById("jobDocId");
       const jobParams = document.getElementById("jobParams");
       const jobOutputDir = document.getElementById("jobOutputDir");
+      const jobIndexStatus = document.getElementById("jobIndexStatus");
+      const jobIndexSummary = document.getElementById("jobIndexSummary");
+      const jobWarnings = document.getElementById("jobWarnings");
       const jobEmptyState = document.getElementById("jobEmptyState");
       const jobLogs = document.getElementById("jobLogs");
 
@@ -496,6 +524,17 @@
         jobDocId.textContent = job.doc_id || "-";
         jobParams.textContent = `${job.ocr_model || "-"} / 并发 ${job.workers ?? "-"}`;
         jobOutputDir.textContent = job.output_dir || "-";
+        const indexStatus = job.index_status || "pending";
+        jobIndexStatus.textContent = {
+          pending: "待执行",
+          verified: "已验证",
+          partial: "部分异常",
+          missing: "未入库",
+        }[indexStatus] || "未知";
+        jobIndexSummary.textContent = job.index_message || "-";
+        const warnings = job.artifact_warnings || [];
+        jobWarnings.hidden = warnings.length === 0;
+        jobWarnings.textContent = warnings.join("\n");
         jobLogs.textContent = (job.logs || []).join("\n");
         jobLogs.scrollTop = jobLogs.scrollHeight;
 

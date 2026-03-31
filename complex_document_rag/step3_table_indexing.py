@@ -111,6 +111,7 @@ def index_single_table(table_block: dict[str, object]) -> TextNode:
     metadata = {
         "table_id": table_id,
         "doc_id": table_block.get("doc_id", ""),
+        "source_doc_id": table_block.get("doc_id", ""),
         "source_path": table_block.get("source_path", ""),
         "page_no": table_block.get("page_no"),
         "page_label": table_block.get("page_label", ""),

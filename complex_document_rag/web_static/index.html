@@ -225,6 +225,15 @@
         min-width: 0;
       }
 
+      .conversation-history,
+      .history-turn {
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+        width: 100%;
+        min-width: 0;
+      }
+
       .msg { display: flex; flex-direction: column; animation: fadeSlideUp 0.28s ease both; }
 
       .msg-user { align-items: flex-end; }
@@ -683,6 +692,7 @@
 
         <!-- Messages (shown after first query) -->
         <div class="messages-area" id="messagesArea" style="display:none">
+          <div id="conversationHistory" class="conversation-history" hidden></div>
           <div class="msg msg-user">
             <div class="msg-bubble" id="answerQuestion"></div>
           </div>
@@ -802,6 +812,7 @@
       const lightboxClose  = document.getElementById("lightboxClose");
       const welcomeState   = document.getElementById("welcomeState");
       const messagesArea   = document.getElementById("messagesArea");
+      const conversationHistory = document.getElementById("conversationHistory");
       const chatArea       = document.getElementById("chatArea");
       const jumpToBottomBtn = document.getElementById("jumpToBottomBtn");
       const AUTO_SCROLL_THRESHOLD_PX = 80;
@@ -820,6 +831,8 @@
       let isQueryInputComposing = false;
       let currentRequestAbortController = null;
       let isRequestInFlight = false;
+      const completedConversationTurns = [];
+      let activeConversationTurn = null;
 
       function isNearBottom() {
         return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight <= AUTO_SCROLL_THRESHOLD_PX;
@@ -864,7 +877,7 @@
           answerQuestion, answerBox, reasoningPanel, reasoningBox, answerAssets, answerError, answerSources,
           textResults, imageResults, tableResults, evidencePanel, imageLightbox,
           lightboxImage, lightboxTitle, lightboxDownload, lightboxClose,
-          welcomeState, messagesArea, chatArea, jumpToBottomBtn,
+          welcomeState, messagesArea, conversationHistory, chatArea, jumpToBottomBtn,
         }).filter(([, v]) => v === null).map(([k]) => k);
         if (nulls.length) {
           console.error("[init] NULL DOM refs:", nulls.join(", "));
@@ -907,10 +920,74 @@
         renderRecents();
       }
 
+      function buildConversationHistoryPayload() {
+        const turns = completedConversationTurns.slice();
+        if (activeConversationTurn?.completed) {
+          turns.push(activeConversationTurn);
+        }
+        return turns
+          .map((turn) => ({
+            query: String(turn?.query || "").trim(),
+            answer: String(turn?.answer || "").trim(),
+          }))
+          .filter((turn) => turn.query && turn.answer);
+      }
+
+      function renderConversationHistory() {
+        conversationHistory.hidden = completedConversationTurns.length === 0;
+        if (!completedConversationTurns.length) {
+          conversationHistory.innerHTML = "";
+          return;
+        }
+
+        conversationHistory.innerHTML = completedConversationTurns.map((turn) => {
+          const reasoningSection = turn.reasoning
+            ? `
+              <details class="reasoning-panel">
+                <summary class="reasoning-label">模型思考过程</summary>
+                <div class="reasoning-body">${escapeHtml(turn.reasoning)}</div>
+              </details>
+            `
+            : "";
+          const answerHtml = turn.answerHtml || renderAnswerMarkdown(turn.answer || "");
+          return `
+            <div class="history-turn">
+              <div class="msg msg-user">
+                <div class="msg-bubble">${escapeHtml(turn.query)}</div>
+              </div>
+              <div class="msg msg-ai">
+                <div class="ai-icon">✦</div>
+                <div class="ai-content">
+                  ${reasoningSection}
+                  <div class="answer-body">${answerHtml}</div>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("");
+        renderMermaidDiagrams(conversationHistory).catch(() => {});
+      }
+
+      function archiveCompletedActiveTurn() {
+        if (!activeConversationTurn?.completed) return;
+        completedConversationTurns.push({
+          query: activeConversationTurn.query,
+          answer: activeConversationTurn.answer,
+          answerHtml: activeConversationTurn.answerHtml,
+          reasoning: activeConversationTurn.reasoning,
+        });
+        activeConversationTurn = null;
+        renderConversationHistory();
+      }
+
       // ── New chat ────────────────────────────────────────────────────────
       document.getElementById("newChatBtn").addEventListener("click", () => {
         welcomeState.style.display = "flex";
         messagesArea.style.display = "none";
+        conversationHistory.hidden = true;
+        conversationHistory.innerHTML = "";
+        completedConversationTurns.length = 0;
+        activeConversationTurn = null;
         shouldAutoScroll = false;
         queryInput.value = "";
         autoResize();
@@ -1102,7 +1179,7 @@
           mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
           mermaidInitialized = true;
         }
-        const blocks = Array.from(answerBox.querySelectorAll("pre.mermaid"))
+        const blocks = Array.from(root.querySelectorAll("pre.mermaid"))
           .filter((block) => !block.dataset.mermaidRendered);
         if (!blocks.length) return;
         blocks.forEach((block) => {
@@ -1287,6 +1364,7 @@
         const shouldFollowNewResponse = messagesArea.style.display !== "none" && isNearBottom();
         const requestAbortController = new AbortController();
         let streamedAnswer = "";
+        let streamedReasoning = "";
         console.log("[runQuery] called, query length:", query.length);
         if (!query) {
           queryInput.focus();
@@ -1297,6 +1375,14 @@
           currentRequestAbortController = requestAbortController;
           isRequestInFlight = true;
           syncSubmitButtonState();
+          archiveCompletedActiveTurn();
+          activeConversationTurn = {
+            query,
+            answer: "",
+            answerHtml: "",
+            reasoning: "",
+            completed: false,
+          };
 
           // Switch to messages view
           welcomeState.style.display = "none";
@@ -1325,7 +1411,11 @@
             const response = await fetch("/api/query", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ query, generate_answer: false }),
+              body: JSON.stringify({
+                query,
+                generate_answer: false,
+                history: buildConversationHistoryPayload(),
+              }),
               signal: requestAbortController.signal,
             });
             const payload = await response.json();
@@ -1344,13 +1434,18 @@
             }
             evidencePanel.open = true;
             requestStatus.textContent = "完成";
+            activeConversationTurn = null;
             return;
           }
 
           const response = await fetch("/api/query/stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query, generate_answer: true }),
+            body: JSON.stringify({
+              query,
+              generate_answer: true,
+              history: buildConversationHistoryPayload(),
+            }),
             signal: requestAbortController.signal,
           });
           if (!response.ok || !response.body) throw new Error("流式请求失败");
@@ -1390,7 +1485,9 @@
 
             if (eventName === "reasoning") {
               reasoningPanel.hidden = false;
-              reasoningBox.textContent += payload.delta || "";
+              streamedReasoning += payload.delta || "";
+              reasoningBox.textContent = streamedReasoning;
+              if (activeConversationTurn) activeConversationTurn.reasoning = streamedReasoning;
               requestStatus.textContent = "模型思考中…";
               scrollChatToBottom();
               updateJumpToBottomVisibility();
@@ -1407,6 +1504,10 @@
               answerBox.innerHTML = renderAnswerMarkdown(streamedAnswer);
               renderMermaidDiagrams(answerBox).catch(() => {});
               answerBox.classList.add("is-streaming");
+              if (activeConversationTurn) {
+                activeConversationTurn.answer = streamedAnswer;
+                activeConversationTurn.answerHtml = answerBox.innerHTML;
+              }
               requestStatus.textContent = "回答生成中…";
               scrollChatToBottom();
               updateJumpToBottomVisibility();
@@ -1431,6 +1532,12 @@
               renderAnswerSources(payload.answer_sources || []);
               evidencePanel.open = !streamedAnswer || !!answerError.textContent;
               requestStatus.textContent = "完成";
+              if (activeConversationTurn) {
+                activeConversationTurn.answer = streamedAnswer;
+                activeConversationTurn.answerHtml = answerBox.innerHTML;
+                activeConversationTurn.reasoning = streamedReasoning;
+                activeConversationTurn.completed = Boolean(streamedAnswer);
+              }
               scrollChatToBottom();
               updateJumpToBottomVisibility();
             }
@@ -1453,6 +1560,12 @@
             if (!streamedAnswer) {
               answerBox.innerHTML = "<p>已停止生成。</p>";
             }
+            if (activeConversationTurn) {
+              activeConversationTurn.answer = streamedAnswer;
+              activeConversationTurn.answerHtml = streamedAnswer ? answerBox.innerHTML : "";
+              activeConversationTurn.reasoning = streamedReasoning;
+              activeConversationTurn.completed = false;
+            }
             updateJumpToBottomVisibility();
             return;
           }
@@ -1468,6 +1581,7 @@
           imageResults.innerHTML = emptyState("请求失败。");
           tableResults.innerHTML = emptyState("请求失败。");
           evidencePanel.open = true;
+          activeConversationTurn = null;
           updateJumpToBottomVisibility();
         } finally {
           currentRequestAbortController = null;

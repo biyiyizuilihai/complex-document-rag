@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 import copy
+import json
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
@@ -168,7 +169,7 @@ class _FakeBackend:
             ],
         }
 
-    def answer(self, query, retrieval=None):
+    def answer(self, query, retrieval=None, history=None):
         if self.fail_answer:
             raise RuntimeError("LLM unavailable")
 
@@ -232,7 +233,7 @@ class _FakeBackend:
             ],
         }
 
-    def stream_answer(self, query, retrieval=None):
+    def stream_answer(self, query, retrieval=None, history=None):
         for delta in ["苯相关作业场所", "需要设置相应警示标识", "，并参照附录 B。"]:
             yield delta
 
@@ -881,6 +882,38 @@ class WebHelpersTests(unittest.TestCase):
         self.assertIn("```mermaid", prompt)
         self.assertIn("先输出文字说明", prompt)
 
+    def test_build_answer_prompt_includes_recent_conversation_history(self):
+        backend = QueryBackend.__new__(QueryBackend)
+        retrieval = {
+            "text_results": [
+                _FakeNode(
+                    text="TI 客户需要参考附录中的 8D 周期要求。",
+                    score=0.83,
+                    metadata={"page_no": 51, "page_label": "51"},
+                )
+            ],
+            "image_results": [],
+            "table_results": [],
+        }
+
+        prompt = QueryBackend.build_answer_prompt(
+            backend,
+            query="那 TI 呢？",
+            retrieval=retrieval,
+            answer_assets=[],
+            history=[
+                {
+                    "query": "ST 客户的 8D 要求是什么？",
+                    "answer": "ST 客户要求 8D CT 为 10 个日历天。",
+                }
+            ],
+        )
+
+        self.assertIn("对话历史", prompt)
+        self.assertIn("上一轮用户：ST 客户的 8D 要求是什么？", prompt)
+        self.assertIn("上一轮助手：ST 客户要求 8D CT 为 10 个日历天。", prompt)
+        self.assertIn("当前问题：那 TI 呢？", prompt)
+
     def test_retrieve_once_reuses_one_query_embedding_for_all_branches(self):
         backend = QueryBackend.__new__(QueryBackend)
         embed_model = _FakeEmbedModel()
@@ -1168,6 +1201,50 @@ class WebAppTests(unittest.TestCase):
             "该表列出禁止入内、禁止停留、禁止启动等标识及设置范围。",
         )
 
+    def test_query_endpoint_forwards_history_to_backend_answer(self):
+        class _HistoryBackend(_FakeBackend):
+            def __init__(self):
+                super().__init__()
+                self.answer_calls = []
+
+            def answer(self, query, retrieval=None, history=None):
+                self.answer_calls.append(
+                    {
+                        "query": query,
+                        "history": copy.deepcopy(history),
+                    }
+                )
+                return super().answer(query, retrieval=retrieval)
+
+        backend = _HistoryBackend()
+        with patch("complex_document_rag.web_app.get_query_backend", return_value=backend):
+            client = TestClient(app)
+            response = client.post(
+                "/api/query",
+                json={
+                    "query": "那 TI 呢？",
+                    "generate_answer": True,
+                    "history": [
+                        {
+                            "query": "ST 客户的 8D 要求是什么？",
+                            "answer": "ST 客户要求 8D CT 为 10 个日历天。",
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(backend.answer_calls), 1)
+        self.assertEqual(
+            backend.answer_calls[0]["history"],
+            [
+                {
+                    "query": "ST 客户的 8D 要求是什么？",
+                    "answer": "ST 客户要求 8D CT 为 10 个日历天。",
+                }
+            ],
+        )
+
     def test_query_endpoint_keeps_retrieval_when_answer_fails(self):
         with patch("complex_document_rag.web_app.get_query_backend", return_value=_FakeBackend(fail_answer=True)):
             client = TestClient(app)
@@ -1198,7 +1275,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_query_endpoint_returns_rendered_answer_html(self):
         class _MarkdownBackend(_FakeBackend):
-            def answer(self, query, retrieval=None):
+            def answer(self, query, retrieval=None, history=None):
                 return {
                     "answer": (
                         "根据**表 A.1**，警示图形基本几何图形见下表：\n\n"
@@ -1240,7 +1317,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_stream_endpoint_emits_partial_answer_html_for_chunks(self):
         class _MarkdownStreamingBackend(_FakeBackend):
-            def stream_answer(self, query, retrieval=None):
+            def stream_answer(self, query, retrieval=None, history=None):
                 return {
                     "stream": iter(
                         [
@@ -1269,7 +1346,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_stream_endpoint_emits_reasoning_before_visible_content(self):
         class _ReasoningBackend(_FakeBackend):
-            def stream_answer(self, query, retrieval=None):
+            def stream_answer(self, query, retrieval=None, history=None):
                 return {
                     "stream": iter(
                         [
@@ -1298,7 +1375,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_stream_endpoint_logs_first_stream_chunk_and_first_visible_content_separately(self):
         class _ReasoningBackend(_FakeBackend):
-            def stream_answer(self, query, retrieval=None):
+            def stream_answer(self, query, retrieval=None, history=None):
                 return {
                     "stream": iter(
                         [
@@ -1413,6 +1490,11 @@ class WebAppTests(unittest.TestCase):
             "error": "",
             "doc_id": "",
             "output_dir": "",
+            "index_status": "pending",
+            "index_message": "",
+            "artifact_warnings": [],
+            "artifact_counts": {},
+            "index_counts": {},
             "upload_path": "/tmp/demo.pdf",
         }
 
@@ -1428,6 +1510,25 @@ class WebAppTests(unittest.TestCase):
             patch("complex_document_rag.web_app.create_qdrant_client", return_value=fake_client),
             patch("complex_document_rag.web_app.delete_doc_vectors") as mock_delete_doc_vectors,
             patch("complex_document_rag.web_app.ingest_document", side_effect=_fake_ingest_document),
+            patch(
+                "complex_document_rag.web_app._compute_ingest_index_status",
+                return_value={
+                    "index_status": "verified",
+                    "index_message": "索引校验通过：文本块 1 -> 文本索引 2；图片描述 1 -> 图片索引 1；表格块 1 -> 表格索引 1",
+                    "artifact_warnings": [],
+                    "artifact_counts": {
+                        "text_blocks": 1,
+                        "image_files": 1,
+                        "image_descriptions": 1,
+                        "table_blocks": 1,
+                    },
+                    "index_counts": {
+                        "text_chunks": 2,
+                        "image_descriptions": 1,
+                        "table_blocks": 1,
+                    },
+                },
+            ),
             patch("complex_document_rag.web_app.get_query_backend", fake_backend_loader),
         ):
             web_app_module._run_ingest_job("job-demo")
@@ -1435,10 +1536,52 @@ class WebAppTests(unittest.TestCase):
         job = web_app_module.INGEST_JOBS["job-demo"]
         self.assertEqual(job["status"], "succeeded")
         self.assertIn("demo", job["doc_id"])
+        self.assertEqual(job["index_status"], "verified")
+        self.assertEqual(job["index_counts"]["image_descriptions"], 1)
+        self.assertIn("索引校验通过", job["index_message"])
         self.assertTrue(any("ingesting /tmp/demo.pdf" in line for line in job["logs"]))
-        mock_delete_doc_vectors.assert_called_once()
+        mock_delete_doc_vectors.assert_called_once_with(fake_client, job["doc_id"], source_path="/tmp/demo.pdf")
         fake_cache_clear.assert_called_once()
         fake_backend_loader.assert_called_once()
+
+    def test_compute_ingest_index_status_reports_verified_with_artifact_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "text_blocks": [{"id": "t1"}, {"id": "t2"}],
+                        "image_blocks": [{"id": "i1"}, {"id": "i2"}, {"id": "i3"}],
+                        "table_blocks": [{"id": "tb1"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            Path(tmpdir, "image_descriptions.json").write_text(
+                json.dumps({"img_1": {"summary": "a"}, "img_2": {"summary": "b"}}),
+                encoding="utf-8",
+            )
+            Path(tmpdir, "table_blocks.json").write_text(
+                json.dumps([{"table_id": "table_1"}]),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "complex_document_rag.web_app.count_doc_vectors",
+                side_effect=[5, 2, 1],
+            ):
+                report = web_app_module._compute_ingest_index_status(
+                    doc_id="doc_demo",
+                    output_dir=tmpdir,
+                    source_path="/tmp/demo.pdf",
+                    client=object(),
+                )
+
+        self.assertEqual(report["index_status"], "verified")
+        self.assertEqual(report["artifact_counts"]["image_files"], 3)
+        self.assertEqual(report["artifact_counts"]["image_descriptions"], 2)
+        self.assertEqual(report["index_counts"]["image_descriptions"], 2)
+        self.assertEqual(len(report["artifact_warnings"]), 1)
+        self.assertIn("未生成图片描述", report["artifact_warnings"][0])
 
     def test_query_backend_uses_dedicated_web_answer_model(self):
         with patch("complex_document_rag.step4_basic_query.load_indexes", return_value=(None, None, None)):
