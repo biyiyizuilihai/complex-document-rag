@@ -72,7 +72,7 @@ docker run -p 6333:6333 qdrant/qdrant
 ## 6. 启动服务
 
 ```bash
-python complex_document_rag/web_app.py
+python -m complex_document_rag serve
 ```
 
 打开：

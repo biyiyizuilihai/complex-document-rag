@@ -11,7 +11,13 @@
 - 需要准备哪些基础设施、环境变量和目录约定
 - 哪些部分适合复用，哪些部分建议替换
 
-本文档默认你集成的是当前仓库中的 [complex_document_rag/web_app.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web_app.py) 这条已经跑通的链路，而不是仓库中 P1-P4 的规划性代码。
+本文档默认你集成的是当前仓库中已经标准化后的主链路：
+
+- 运行入口：[complex_document_rag/cli.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/cli.py)
+- Web 装配入口：[complex_document_rag/web/routes.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/routes.py)
+- 问答核心：[complex_document_rag/web/backend.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/backend.py)
+
+而不是仓库早期 `step0/2/3/4` 式的兼容壳文件。
 
 ---
 
@@ -103,7 +109,7 @@ flowchart LR
 
 做法：
 
-- 保留当前 `step0_document_ingestion.py` 作为离线构建器
+- 保留当前 `python -m complex_document_rag ingest ...` 作为离线构建器
 - 你自己的系统只消费 `document.md`、`image_descriptions.json`、`table_blocks.json`
 - 检索和回答逻辑由你的系统自己实现
 
@@ -117,15 +123,15 @@ flowchart LR
 
 ### 4.1 Web 服务入口
 
-- [complex_document_rag/web_app.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web_app.py)
+- [complex_document_rag/web/routes.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/routes.py)
+- [complex_document_rag/web/backend.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/backend.py)
+- [complex_document_rag/web/jobs.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/jobs.py)
 
 职责：
 
-- 创建 FastAPI 应用
-- 预热 `QueryBackend`
-- 暴露摄入 API、同步查询 API、流式查询 API
-- 组织回答提示词
-- 处理素材筛选、多模态回答和 SSE 输出
+- `web/routes.py` 负责创建 FastAPI 应用、挂载静态目录、注册 query/ingest routers、预热 backend
+- `web/backend.py` 负责 `QueryBackend`、检索、素材筛选、回答生成、SSE 相关逻辑
+- `web/jobs.py` 负责摄入任务状态、日志、后台执行和索引校验
 
 ### 4.2 配置入口
 
@@ -138,21 +144,23 @@ flowchart LR
 
 ### 4.3 文档摄入编排
 
-- [complex_document_rag/step0_document_ingestion.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step0_document_ingestion.py)
-- [complex_document_rag/document_ingestion.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/document_ingestion.py)
+- [complex_document_rag/ingestion/pipeline.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/pipeline.py)
+- [complex_document_rag/ingestion/artifacts.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/artifacts.py)
+- [complex_document_rag/ingestion/images.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/images.py)
+- [complex_document_rag/ingestion/tables.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/tables.py)
 
 职责：
 
-- 调用外部 OCR 脚本
-- 归一化 OCR 结果
-- 生成标准化中间产物
-- 触发文本、图片、表格的索引写入
+- `ingestion/pipeline.py` 调用外部 OCR 脚本并编排整条摄入链路
+- `ingestion/artifacts.py` 负责 OCR 结果归一化、manifest 生成和产物收集
+- `ingestion/images.py` 负责图片描述 payload 生成
+- `ingestion/tables.py` 负责表格抽取和逻辑表合并
 
 ### 4.4 向量索引写入
 
-- [complex_document_rag/step2_vector_indexing.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step2_vector_indexing.py)
-- [complex_document_rag/step3_image_indexing.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step3_image_indexing.py)
-- [complex_document_rag/step3_table_indexing.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step3_table_indexing.py)
+- [complex_document_rag/indexing/text_index.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/text_index.py)
+- [complex_document_rag/indexing/image_index.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/image_index.py)
+- [complex_document_rag/indexing/table_index.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/table_index.py)
 
 职责：
 
@@ -171,7 +179,7 @@ flowchart LR
 
 ### 4.6 Web 序列化与 HTML 渲染
 
-- [complex_document_rag/web_helpers.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web_helpers.py)
+- [complex_document_rag/web/helpers.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/helpers.py)
 
 职责：
 
@@ -321,7 +329,7 @@ complex_document_rag/ingestion_output/<doc_id>/
 
 重复摄入同一个 `doc_id` 时，会先按 `doc_id` 删除旧向量，再重新写入。
 
-相关实现见 [qdrant_management.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/qdrant_management.py#L20)。
+相关实现见 [indexing/qdrant.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/qdrant.py#L20)。
 
 这意味着：
 
@@ -336,12 +344,13 @@ complex_document_rag/ingestion_output/<doc_id>/
 
 离线摄入主入口：
 
-- [step0_document_ingestion.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step0_document_ingestion.py)
+- CLI：`python -m complex_document_rag ingest`
+- 实现：[complex_document_rag/ingestion/pipeline.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/pipeline.py)
 
 命令行示例：
 
 ```bash
-python complex_document_rag/step0_document_ingestion.py \
+python -m complex_document_rag ingest \
   --input "/absolute/path/to/your.pdf" \
   --ocr-model qwen3.5-plus \
   --workers 4 \
@@ -379,7 +388,7 @@ flowchart TD
 
 ### 10.1 `QueryBackend` 角色
 
-`QueryBackend` 是在线问答链路的核心对象，定义在 [web_app.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web_app.py#L674)。
+`QueryBackend` 是在线问答链路的核心对象，定义在 [web/backend.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/web/backend.py)。
 
 职责包括：
 
@@ -702,7 +711,7 @@ flowchart TD
 ### 14.1 挂载 FastAPI 应用
 
 ```python
-from complex_document_rag.web_app import create_app
+from complex_document_rag.web.routes import create_app
 
 app = create_app()
 ```
@@ -715,7 +724,7 @@ app = create_app()
 ### 14.2 直接调用 QueryBackend
 
 ```python
-from complex_document_rag.web_app import get_query_backend
+from complex_document_rag.web.backend import get_query_backend
 
 backend = get_query_backend()
 retrieval = backend.retrieve("关键不良处理流程（flow图）")
@@ -909,9 +918,9 @@ answer = backend.answer("关键不良处理流程（flow图）", retrieval=retri
 以下部分与向量库无关，或者关系很弱，可以直接保留：
 
 - PDF 摄入入口  
-  [step0_document_ingestion.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step0_document_ingestion.py)
+  [ingestion/pipeline.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/pipeline.py)
 - OCR 结果归一化  
-  [document_ingestion.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/document_ingestion.py)
+  [ingestion/artifacts.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/artifacts.py) / [ingestion/images.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/images.py) / [ingestion/tables.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/ingestion/tables.py)
 - 中间产物结构
   - `document.md`
   - `manifest.json`
@@ -932,7 +941,7 @@ answer = backend.answer("关键不良处理流程（flow图）", retrieval=retri
 
 #### 1. 文本索引写入
 
-- [step2_vector_indexing.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step2_vector_indexing.py)
+- [indexing/text_index.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/text_index.py)
 
 当前实现使用：
 
@@ -948,21 +957,21 @@ answer = backend.answer("关键不良处理流程（flow图）", retrieval=retri
 
 #### 2. 图片索引写入
 
-- [step3_image_indexing.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step3_image_indexing.py)
+- [indexing/image_index.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/image_index.py)
 
 当前写的是 `image_descriptions` collection。  
 切到 pgvector 后，需要把 `TextNode(text=detailed_description, metadata=...)` 这套数据写进 PostgreSQL 表。
 
 #### 3. 表格索引写入
 
-- [step3_table_indexing.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step3_table_indexing.py)
+- [indexing/table_index.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/table_index.py)
 
 当前写的是 `table_blocks` collection。  
 切到 pgvector 后，表格块同样改为 PostgreSQL 表。
 
 #### 4. 索引加载与检索
 
-- [step4_basic_query.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/step4_basic_query.py)
+- [retrieval/query_console.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/retrieval/query_console.py)
 
 这里的 `load_indexes()`、`as_retriever()`、`QdrantVectorStore(...)` 都是 Qdrant 耦合点。  
 如果切 pgvector，这部分要改成：
@@ -973,7 +982,7 @@ answer = backend.answer("关键不良处理流程（flow图）", retrieval=retri
 
 #### 5. 按 `doc_id` 删除旧向量
 
-- [qdrant_management.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/qdrant_management.py)
+- [indexing/qdrant.py](/Users/biyiyi/Downloads/ocr-markdown%202/complex-document-rag/complex_document_rag/indexing/qdrant.py)
 
 当前上传同名 PDF 时，会先按 `doc_id` 删除三套 collection 里的旧数据。  
 切到 pgvector 后，需要改成 PostgreSQL 的删除逻辑：
@@ -1086,7 +1095,7 @@ table_blocks
 理想状态下，你最终应该把当前实现变成这样：
 
 ```text
-step0_document_ingestion.py
+ingestion/pipeline.py
   -> vector_repository.upsert_*(...)
 
 QueryBackend

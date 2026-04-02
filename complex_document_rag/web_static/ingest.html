@@ -170,16 +170,77 @@
 
       .dropzone {
         display: grid;
-        gap: 10px;
-        padding: 18px;
-        border: 1.5px dashed rgba(15, 109, 98, 0.28);
-        border-radius: 16px;
-        background: rgba(15, 109, 98, 0.05);
+        gap: 14px;
+        padding: 22px;
+        border: 1.5px dashed rgba(15, 109, 98, 0.3);
+        border-radius: 18px;
+        background:
+          radial-gradient(circle at top right, rgba(15, 109, 98, 0.12), transparent 36%),
+          linear-gradient(180deg, rgba(15, 109, 98, 0.06), rgba(255, 255, 255, 0.92));
         margin-bottom: 16px;
+        transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+        cursor: pointer;
       }
 
       .dropzone strong { font-size: 16px; }
       .dropzone p { color: var(--muted); line-height: 1.6; }
+      .dropzone.is-dragover {
+        border-color: rgba(15, 109, 98, 0.52);
+        box-shadow: 0 16px 30px rgba(15, 109, 98, 0.12);
+        transform: translateY(-1px);
+      }
+
+      .dropzone-badge {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        border-radius: 999px;
+        padding: 6px 10px;
+        background: rgba(15, 109, 98, 0.12);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      .dropzone-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .button-compact {
+        padding: 10px 14px;
+        border-radius: 10px;
+      }
+
+      #fileInput {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .file-meta {
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(26, 26, 23, 0.1);
+        background: rgba(255, 255, 255, 0.75);
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .file-meta.is-selected {
+        color: var(--ink);
+        font-weight: 600;
+        background: rgba(255, 255, 255, 0.96);
+      }
 
       .field {
         display: grid;
@@ -404,9 +465,14 @@
             <h2>上传与参数</h2>
             <p class="panel-intro">左侧设置 OCR 参数，右侧实时查看任务状态和日志。</p>
 
-            <div class="dropzone">
-              <strong>上传 PDF</strong>
+            <div id="fileDropzone" class="dropzone" role="button" tabindex="0" aria-controls="fileInput">
+              <span class="dropzone-badge">PDF · 单文件</span>
+              <strong>拖拽 PDF 到这里</strong>
               <p>选择单个 `.pdf` 文件。重复上传同名文档时，会先清理旧向量再重新入库。</p>
+              <div class="dropzone-row">
+                <button id="fileTriggerButton" class="button button-secondary button-compact" type="button">选择文件</button>
+                <div id="fileMeta" class="file-meta">未选择任何文件</div>
+              </div>
               <input id="fileInput" type="file" accept="application/pdf,.pdf" />
             </div>
 
@@ -417,8 +483,8 @@
 
             <div class="field">
               <label for="workersInput">OCR 并发数</label>
-              <input id="workersInput" type="number" min="1" step="1" />
-              <div class="hint">并发数越高，OCR 越快，但也更吃 API 配额和本机资源。</div>
+              <input id="workersInput" type="number" min="1" max="20" step="1" />
+              <div class="hint">支持 1-20 并发。并发数越高，OCR 越快，但也更吃 API 配额和本机资源。</div>
             </div>
 
             <div class="hint">
@@ -480,6 +546,9 @@
 
     <script>
       const fileInput = document.getElementById("fileInput");
+      const fileDropzone = document.getElementById("fileDropzone");
+      const fileTriggerButton = document.getElementById("fileTriggerButton");
+      const fileMeta = document.getElementById("fileMeta");
       const ocrModelSelect = document.getElementById("ocrModelSelect");
       const workersInput = document.getElementById("workersInput");
       const startIngestButton = document.getElementById("startIngestButton");
@@ -498,6 +567,7 @@
 
       let activeJobId = "";
       let pollTimer = null;
+      let selectedFile = null;
 
       function setError(message) {
         const text = String(message || "").trim();
@@ -508,6 +578,19 @@
       function setPendingState(pending) {
         startIngestButton.disabled = pending;
         startIngestButton.textContent = pending ? "摄入中…" : "开始摄入";
+      }
+
+      function updateSelectedFile(file) {
+        selectedFile = file || null;
+        if (!selectedFile) {
+          fileMeta.textContent = "未选择任何文件";
+          fileMeta.classList.remove("is-selected");
+          return;
+        }
+
+        const sizeInMb = selectedFile.size ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : "大小未知";
+        fileMeta.textContent = `${selectedFile.name} · ${sizeInMb}`;
+        fileMeta.classList.add("is-selected");
       }
 
       function renderJob(job) {
@@ -559,7 +642,7 @@
         ocrModelSelect.value = payload.default_ocr_model || "";
         workersInput.value = payload.default_workers || 4;
         workersInput.min = payload.min_workers || 1;
-        workersInput.max = payload.max_workers || 12;
+        workersInput.max = payload.max_workers || 20;
       }
 
       async function pollJobStatus() {
@@ -589,7 +672,7 @@
           pollTimer = null;
         }
 
-        const file = fileInput.files?.[0];
+        const file = selectedFile || fileInput.files?.[0];
         if (!file) {
           setError("请先选择一个 PDF 文件。");
           return;
@@ -622,6 +705,48 @@
           setError(error.message || String(error));
         }
       }
+
+      fileTriggerButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        fileInput.click();
+      });
+
+      fileDropzone.addEventListener("click", () => {
+        fileInput.click();
+      });
+
+      fileDropzone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          fileInput.click();
+        }
+      });
+
+      fileInput.addEventListener("change", () => {
+        updateSelectedFile(fileInput.files?.[0] || null);
+      });
+
+      fileDropzone.addEventListener("dragenter", (event) => {
+        event.preventDefault();
+        fileDropzone.classList.add("is-dragover");
+      });
+
+      fileDropzone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        fileDropzone.classList.add("is-dragover");
+      });
+
+      fileDropzone.addEventListener("dragleave", (event) => {
+        if (event.currentTarget.contains(event.relatedTarget)) return;
+        fileDropzone.classList.remove("is-dragover");
+      });
+
+      fileDropzone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        fileDropzone.classList.remove("is-dragover");
+        const file = event.dataTransfer?.files?.[0] || null;
+        updateSelectedFile(file);
+      });
 
       startIngestButton.addEventListener("click", startIngest);
       goToChatButton.addEventListener("click", () => {

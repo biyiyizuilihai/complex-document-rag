@@ -331,8 +331,147 @@
         font-size: inherit;
       }
       .answer-body pre.mermaid {
+        padding: 0;
+        background: transparent;
+        border: none;
+        overflow: visible;
+        opacity: 0;
+        max-height: 0;
+        pointer-events: none;
+      }
+      .answer-body pre.mermaid[data-mermaid-ready="true"] {
+        opacity: 1;
+        max-height: none;
+        pointer-events: auto;
+      }
+      .answer-body pre.mermaid[data-mermaid-error="true"] {
+        opacity: 1;
+        max-height: none;
+        pointer-events: auto;
         padding: 8px;
+        border: 1px solid rgba(139,62,34,0.16);
+        background: rgba(139,62,34,0.06);
+      }
+      .mermaid-card {
+        margin: 14px 0 0;
+        border: 1px solid rgba(15,109,98,0.14);
+        border-radius: 16px;
+        background: rgba(248,251,250,0.96);
+        overflow: hidden;
+      }
+      .mermaid-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid rgba(15,109,98,0.1);
+      }
+      .mermaid-card-title {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 700;
+        color: #2e4944;
+      }
+      .mermaid-card-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .mermaid-card-hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .mermaid-zoom-button {
+        border: 1px solid rgba(15,109,98,0.16);
+        border-radius: 999px;
+        padding: 7px 12px;
         background: #fff;
+        color: var(--accent);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: transform 0.15s, box-shadow 0.15s;
+      }
+      .mermaid-zoom-button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(15,109,98,0.12);
+      }
+      .mermaid-preview {
+        padding: 14px;
+        max-height: 340px;
+        overflow: auto;
+        background: #fff;
+        cursor: zoom-in;
+      }
+      .mermaid-pending {
+        margin: 14px 0 0;
+        padding: 14px 16px;
+        border: 1px dashed rgba(15,109,98,0.18);
+        border-radius: 14px;
+        background: rgba(15,109,98,0.04);
+        color: #466560;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .answer-body .mermaid-preview pre.mermaid {
+        margin: 0;
+        min-width: fit-content;
+      }
+      .answer-body .mermaid-preview svg {
+        display: block;
+        width: min(100%, 900px);
+        height: auto;
+        margin: 0 auto;
+      }
+      .mermaid-modal {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(17,14,11,0.72);
+        backdrop-filter: blur(10px);
+        z-index: 1000;
+      }
+      .mermaid-modal.is-open {
+        display: flex;
+        animation: fadeSlideUp 0.2s ease;
+      }
+      .mermaid-modal-stage {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
+        overflow: hidden;
+        border-radius: 16px;
+        background: #f4ede4;
+        padding: 16px;
+        touch-action: none;
+        cursor: default;
+      }
+      .mermaid-modal-stage.is-zoomed { cursor: grab; }
+      .mermaid-modal-stage.is-dragging { cursor: grabbing; }
+      .mermaid-modal-figure {
+        min-width: max-content;
+        will-change: transform;
+        transform-origin: center center;
+        transition: transform 0.16s ease;
+      }
+      .mermaid-modal-figure pre.mermaid {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        border: none;
+        overflow: visible;
+      }
+      .mermaid-modal-figure svg {
+        display: block;
+        max-width: none;
+        height: auto;
       }
       .reasoning-panel {
         margin-bottom: 12px;
@@ -787,6 +926,27 @@
       </div>
     </div>
 
+    <div id="mermaidModal" class="mermaid-modal" hidden>
+      <div class="lightbox-dialog" role="dialog" aria-modal="true" aria-labelledby="mermaidModalTitle">
+        <div class="lightbox-head">
+          <div>
+            <h3 id="mermaidModalTitle" class="lightbox-title">流程图放大查看</h3>
+            <div class="mermaid-card-hint">滚轮缩放，按住鼠标左键拖动画布，双击可重置视图。</div>
+          </div>
+          <div class="lightbox-actions">
+            <button id="mermaidZoomOut" class="lightbox-button" type="button" aria-label="缩小">－</button>
+            <button id="mermaidZoomIn" class="lightbox-button" type="button" aria-label="放大">＋</button>
+            <button id="mermaidResetView" class="lightbox-button" type="button">重置视图</button>
+            <button id="mermaidFitToScreen" class="lightbox-button" type="button">适配屏幕</button>
+            <button id="mermaidModalClose" class="lightbox-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="mermaidModalViewport" class="mermaid-modal-stage">
+          <div id="mermaidModalContent" class="mermaid-modal-figure"></div>
+        </div>
+      </div>
+    </div>
+
     <script>
       // ── DOM refs ───────────────────────────────────────────────────────
       const queryInput     = document.getElementById("queryInput");
@@ -810,6 +970,15 @@
       const lightboxTitle  = document.getElementById("lightboxTitle");
       const lightboxDownload = document.getElementById("lightboxDownload");
       const lightboxClose  = document.getElementById("lightboxClose");
+      const mermaidModal   = document.getElementById("mermaidModal");
+      const mermaidModalTitle = document.getElementById("mermaidModalTitle");
+      const mermaidModalViewport = document.getElementById("mermaidModalViewport");
+      const mermaidModalContent = document.getElementById("mermaidModalContent");
+      const mermaidZoomOut = document.getElementById("mermaidZoomOut");
+      const mermaidZoomIn = document.getElementById("mermaidZoomIn");
+      const mermaidResetView = document.getElementById("mermaidResetView");
+      const mermaidFitToScreen = document.getElementById("mermaidFitToScreen");
+      const mermaidModalClose = document.getElementById("mermaidModalClose");
       const welcomeState   = document.getElementById("welcomeState");
       const messagesArea   = document.getElementById("messagesArea");
       const conversationHistory = document.getElementById("conversationHistory");
@@ -833,6 +1002,10 @@
       let isRequestInFlight = false;
       const completedConversationTurns = [];
       let activeConversationTurn = null;
+      let mermaidModalScale = 1;
+      let mermaidModalTranslateX = 0;
+      let mermaidModalTranslateY = 0;
+      let mermaidDragState = null;
 
       function isNearBottom() {
         return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight <= AUTO_SCROLL_THRESHOLD_PX;
@@ -890,6 +1063,10 @@
       function autoResize() {
         queryInput.style.height = "auto";
         queryInput.style.height = Math.min(queryInput.scrollHeight, 200) + "px";
+      }
+      function clearQueryInputAfterSubmit() {
+        queryInput.value = "";
+        autoResize();
       }
       queryInput.addEventListener("input", autoResize);
 
@@ -949,6 +1126,35 @@
               </details>
             `
             : "";
+          const assetsSection = turn.answerAssetsHtml
+            ? `
+              <div class="assets-section">
+                <div class="assets-label">回答附图 / 附表</div>
+                <div class="asset-grid">${turn.answerAssetsHtml}</div>
+              </div>
+            `
+            : "";
+          const errorSection = turn.answerErrorText
+            ? `<div class="error">${escapeHtml(turn.answerErrorText)}</div>`
+            : "";
+          const evidenceSection = (turn.answerSourcesHtml || turn.textResultsHtml || turn.imageResultsHtml || turn.tableResultsHtml)
+            ? `
+              <details class="evidence-panel">
+                <summary>▸ 查看证据 / 来源</summary>
+                <div class="evidence-content">
+                  <h4>回答来源</h4>
+                  <div class="source-list">${turn.answerSourcesHtml || emptyState('当前回答还没有引用来源，或者你关闭了“生成回答”。')}</div>
+                  <h4 style="margin-top:16px">检索结果</h4>
+                  <div class="results-grid">
+                    <div><h5>文本</h5><div>${turn.textResultsHtml || emptyState("没有命中文本块。")}</div></div>
+                    <div><h5>图片</h5><div>${turn.imageResultsHtml || emptyState("没有命中图片描述。")}</div></div>
+                  </div>
+                  <h5 style="margin-top:14px">表格</h5>
+                  <div>${turn.tableResultsHtml || emptyState("没有命中表格块。")}</div>
+                </div>
+              </details>
+            `
+            : "";
           const answerHtml = turn.answerHtml || renderAnswerMarkdown(turn.answer || "");
           return `
             <div class="history-turn">
@@ -960,6 +1166,9 @@
                 <div class="ai-content">
                   ${reasoningSection}
                   <div class="answer-body">${answerHtml}</div>
+                  ${assetsSection}
+                  ${errorSection}
+                  ${evidenceSection}
                 </div>
               </div>
             </div>
@@ -975,6 +1184,12 @@
           answer: activeConversationTurn.answer,
           answerHtml: activeConversationTurn.answerHtml,
           reasoning: activeConversationTurn.reasoning,
+          answerAssetsHtml: answerAssets.innerHTML,
+          answerSourcesHtml: answerSources.innerHTML,
+          textResultsHtml: textResults.innerHTML,
+          imageResultsHtml: imageResults.innerHTML,
+          tableResultsHtml: tableResults.innerHTML,
+          answerErrorText: answerError.hidden ? "" : answerError.textContent,
         });
         activeConversationTurn = null;
         renderConversationHistory();
@@ -1095,7 +1310,8 @@
       }
 
       // ── Markdown rendering ────────────────────────────────────────────
-      function renderAnswerMarkdown(value) {
+      function renderAnswerMarkdown(value, options = {}) {
+        const deferMermaid = Boolean(options.deferMermaid);
         const text = String(value ?? "").trim();
         if (!text) return `<p>本次未生成回答，请展开下方证据面板查看召回结果。</p>`;
 
@@ -1124,7 +1340,11 @@
             }
             const codeContent = escapeHtml(codeLines.join("\n"));
             if (fenceLang === "mermaid") {
-              parts.push(`<pre class="mermaid">${codeContent}</pre>`);
+              if (deferMermaid) {
+                parts.push(`<div class="mermaid-pending">流程图生成中，代码块完整后自动渲染。</div>`);
+              } else {
+                parts.push(`<pre class="mermaid">${codeContent}</pre>`);
+              }
             } else {
               parts.push(`<pre><code>${codeContent}</code></pre>`);
             }
@@ -1171,6 +1391,26 @@
         return parts.join("");
       }
 
+      function hasClosedMermaidFence(value) {
+        const lines = String(value ?? "").split("\n");
+        let activeFenceLang = null;
+        let hasOpenMermaidFence = false;
+
+        for (const line of lines) {
+          const stripped = String(line ?? "").trim();
+          if (!stripped.startsWith("```")) continue;
+          const fenceLang = stripped.slice(3).trim().toLowerCase();
+          if (activeFenceLang === null) {
+            activeFenceLang = fenceLang || "__plain__";
+            if (activeFenceLang === "mermaid") hasOpenMermaidFence = true;
+          } else {
+            if (activeFenceLang === "mermaid") hasOpenMermaidFence = false;
+            activeFenceLang = null;
+          }
+        }
+        return !hasOpenMermaidFence;
+      }
+
       let mermaidInitialized = false;
 
       async function renderMermaidDiagrams(root) {
@@ -1184,8 +1424,139 @@
         if (!blocks.length) return;
         blocks.forEach((block) => {
           block.dataset.mermaidRendered = "true";
+          block.dataset.mermaidPending = "true";
         });
-        await mermaid.run({ nodes: blocks });
+        try {
+          await mermaid.run({ nodes: blocks });
+          blocks.forEach((block, index) => {
+            delete block.dataset.mermaidPending;
+            block.dataset.mermaidReady = "true";
+            enhanceMermaidBlock(block, index + 1);
+          });
+        } catch (error) {
+          blocks.forEach((block) => {
+            delete block.dataset.mermaidPending;
+            block.dataset.mermaidError = "true";
+          });
+          throw error;
+        }
+      }
+
+      function enhanceMermaidBlock(block, index = 1) {
+        if (!block || block.dataset.mermaidEnhanced) return;
+
+        const card = document.createElement("figure");
+        card.className = "mermaid-card";
+
+        const head = document.createElement("div");
+        head.className = "mermaid-card-head";
+
+        const title = document.createElement("figcaption");
+        title.className = "mermaid-card-title";
+        title.textContent = `流程图预览 ${index}`;
+
+        const actions = document.createElement("div");
+        actions.className = "mermaid-card-actions";
+
+        const zoomButton = document.createElement("button");
+        zoomButton.type = "button";
+        zoomButton.className = "mermaid-zoom-button";
+        zoomButton.dataset.mermaidAction = "zoom";
+        zoomButton.textContent = "放大查看";
+
+        actions.appendChild(zoomButton);
+        head.appendChild(title);
+        head.appendChild(actions);
+
+        const preview = document.createElement("div");
+        preview.className = "mermaid-preview";
+        preview.title = "点击放大查看，弹层中支持滚轮缩放和拖动";
+
+        block.parentNode.insertBefore(card, block);
+        preview.appendChild(block);
+        card.appendChild(head);
+        card.appendChild(preview);
+        block.dataset.mermaidEnhanced = "true";
+      }
+
+      function openMermaidModal(sourceBlock, title = "流程图放大查看") {
+        if (!sourceBlock || !mermaidModal) return;
+        mermaidModalTitle.textContent = title;
+        mermaidModalContent.innerHTML = "";
+        const clone = sourceBlock.cloneNode(true);
+        clone.removeAttribute("data-mermaid-enhanced");
+        mermaidModalContent.appendChild(clone);
+        mermaidModalScale = 1;
+        mermaidModalTranslateX = 0;
+        mermaidModalTranslateY = 0;
+        updateMermaidModalTransform();
+        mermaidModal.hidden = false;
+        mermaidModal.classList.add("is-open");
+        document.body.style.overflow = "hidden";
+        requestAnimationFrame(() => fitMermaidToScreen());
+      }
+
+      function closeMermaidModal() {
+        mermaidModal.classList.remove("is-open");
+        mermaidModal.hidden = true;
+        mermaidModalContent.innerHTML = "";
+        mermaidModalViewport.classList.remove("is-zoomed", "is-dragging");
+        mermaidDragState = null;
+        if (!imageLightbox.classList.contains("is-open")) {
+          document.body.style.overflow = "";
+        }
+      }
+
+      function updateMermaidModalTransform() {
+        mermaidModalContent.style.transform = `translate(${mermaidModalTranslateX}px, ${mermaidModalTranslateY}px) scale(${mermaidModalScale})`;
+        mermaidModalViewport.classList.toggle("is-zoomed", mermaidModalScale > 1.001);
+      }
+
+      function adjustMermaidZoom(delta) {
+        const nextScale = Math.max(0.7, Math.min(3, Number((mermaidModalScale + delta).toFixed(2))));
+        if (nextScale === mermaidModalScale) return;
+        mermaidModalScale = nextScale;
+        if (mermaidModalScale <= 1) {
+          mermaidModalTranslateX = 0;
+          mermaidModalTranslateY = 0;
+        }
+        updateMermaidModalTransform();
+      }
+
+      function resetMermaidModalView() {
+        mermaidModalScale = 1;
+        mermaidModalTranslateX = 0;
+        mermaidModalTranslateY = 0;
+        updateMermaidModalTransform();
+      }
+
+      function fitMermaidToScreen() {
+        const svg = mermaidModalContent.querySelector("svg");
+        if (!svg) {
+          resetMermaidModalView();
+          return;
+        }
+        const availableWidth = Math.max(0, mermaidModalViewport.clientWidth - 32);
+        const availableHeight = Math.max(0, mermaidModalViewport.clientHeight - 32);
+        let contentWidth = Number(svg.getAttribute("width")) || 0;
+        let contentHeight = Number(svg.getAttribute("height")) || 0;
+        if ((!contentWidth || !contentHeight) && svg.viewBox?.baseVal) {
+          contentWidth = svg.viewBox.baseVal.width;
+          contentHeight = svg.viewBox.baseVal.height;
+        }
+        if ((!contentWidth || !contentHeight) && typeof svg.getBBox === "function") {
+          const bbox = svg.getBBox();
+          contentWidth = bbox.width;
+          contentHeight = bbox.height;
+        }
+        if (!contentWidth || !contentHeight || !availableWidth || !availableHeight) {
+          resetMermaidModalView();
+          return;
+        }
+        mermaidModalScale = Math.max(0.7, Math.min(1.4, Math.min(availableWidth / contentWidth, availableHeight / contentHeight)));
+        mermaidModalTranslateX = 0;
+        mermaidModalTranslateY = 0;
+        updateMermaidModalTransform();
       }
 
       function renderInlineMarkdown(value) {
@@ -1229,18 +1600,52 @@
         }).join("");
       }
 
+      function stripLogicalTableComments(raw) {
+        return String(raw || "")
+          .split("\n")
+          .filter((line) => !/^\s*<!--\s*logical-table-page:[^>]*-->\s*$/i.test(line.trim()))
+          .join("\n")
+          .trim();
+      }
+
       function markdownTableToHtml(raw, docId) {
-        const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-        if (lines.length < 2 || !lines.every((l) => l.includes("|"))) return `<pre>${escapeHtml(raw)}</pre>`;
+        const cleanedRaw = stripLogicalTableComments(raw);
+        const lines = cleanedRaw
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line && line.includes("|"));
+        if (lines.length < 2) return `<pre>${escapeHtml(cleanedRaw || raw)}</pre>`;
 
-        const rows = lines
-          .filter((l, i) => !(i === 1 && /^(\|\s*:?-+:?\s*)+\|?$/.test(l)))
-          .map((l) =>
-            l.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim())
-          );
-        if (!rows.length) return `<pre>${escapeHtml(raw)}</pre>`;
+        const isAlignRow = (line) => /^(\|\s*:?-+:?\s*)+\|?$/.test(line);
+        const splitRow = (line) => line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
 
-        const [header, ...body] = rows;
+        let header = null;
+        const body = [];
+        let index = 0;
+        while (index < lines.length) {
+          const line = lines[index];
+          const nextLine = lines[index + 1] || "";
+
+          if (nextLine && isAlignRow(nextLine)) {
+            const candidateHeader = splitRow(line);
+            if (!header) {
+              header = candidateHeader;
+            }
+            index += 2;
+            continue;
+          }
+
+          const row = splitRow(line);
+          if (!header) {
+            header = row;
+          } else {
+            body.push(row);
+          }
+          index += 1;
+        }
+
+        if (!header) return `<pre>${escapeHtml(cleanedRaw || raw)}</pre>`;
+
         const renderCell = (cell) => {
           const placeholders = [];
           const normalized = String(cell ?? "")
@@ -1256,10 +1661,11 @@
           return rendered;
         };
 
-        const headHtml = `<tr>${header.map((c) => `<th>${renderCell(c)}</th>`).join("")}</tr>`;
-        const bodyHtml = body.map((row) => `<tr>${row.map((c) => `<td>${renderCell(c)}</td>`).join("")}</tr>`).join("");
+        const headHtml = `<tr>${header.map((cell) => `<th>${renderCell(cell)}</th>`).join("")}</tr>`;
+        const bodyHtml = body.map((row) => `<tr>${row.map((cell) => `<td>${renderCell(cell)}</td>`).join("")}</tr>`).join("");
         return `<table><thead>${headHtml}</thead><tbody>${bodyHtml}</tbody></table>`;
       }
+
 
       function renderTableCards(items) {
         if (!items.length) return emptyState("没有命中表格块。");
@@ -1267,11 +1673,11 @@
           const preview = item.raw_format === "html"
             ? normalizeHtmlTable(item.raw_table || "", item.doc_id) || `<pre>${escapeHtml(item.normalized_table_text || "")}</pre>`
             : markdownTableToHtml(item.raw_table || item.normalized_table_text || "", item.doc_id);
-          const summary = item.semantic_summary || item.summary || "";
+          const summary = item.semantic_summary || item.summary || item.section_title || "";
           return `
             <article class="card">
               <div class="card-head">
-                <h3>${escapeHtml(item.caption || item.summary || item.table_id || "表格")}</h3>
+                <h3>${escapeHtml(item.display_title || item.caption || item.summary || item.table_id || "表格")}</h3>
                 <div class="meta">相似度 ${item.score}</div>
               </div>
               <div class="meta">文档 ${escapeHtml(item.doc_id || "-")} / 页码 ${item.page_no ?? "-"}</div>
@@ -1303,11 +1709,11 @@
             const preview = item.raw_format === "html"
               ? normalizeHtmlTable(item.raw_table || "", item.doc_id) || `<pre>${escapeHtml(item.normalized_table_text || "")}</pre>`
               : markdownTableToHtml(item.raw_table || item.normalized_table_text || "", item.doc_id);
-            const summary = item.semantic_summary || item.summary || "";
+            const summary = item.semantic_summary || item.summary || item.section_title || "";
             return `
               <article class="card card-wide table-card">
                 <div class="card-head">
-                  <h3>${escapeHtml(item.caption || item.summary || item.table_id || "表格")}</h3>
+                  <h3>${escapeHtml(item.display_title || item.caption || item.summary || item.table_id || "表格")}</h3>
                   <div class="meta">页码 ${item.page_no ?? "-"}</div>
                 </div>
                 ${summary ? `<p class="table-summary">${escapeHtml(summary)}</p>` : ""}
@@ -1326,9 +1732,9 @@
         }
         answerSources.innerHTML = items.map((item) => {
           const detail = item.kind === "image"
-            ? escapeHtml(item.summary || item.image_id || "")
+            ? escapeHtml(item.display_title || item.summary || item.image_id || "")
             : item.kind === "table"
-              ? escapeHtml(item.semantic_summary || item.caption || item.summary || item.table_id || "")
+              ? escapeHtml(item.display_title || item.semantic_summary || item.caption || item.summary || item.table_id || "")
               : escapeHtml(item.snippet || item.text || "");
           return `
             <article class="source-pill">
@@ -1383,6 +1789,7 @@
             reasoning: "",
             completed: false,
           };
+          clearQueryInputAfterSubmit();
 
           // Switch to messages view
           welcomeState.style.display = "none";
@@ -1501,8 +1908,13 @@
                 hasFirstToken = true;
               }
               streamedAnswer += payload.delta || "";
-              answerBox.innerHTML = renderAnswerMarkdown(streamedAnswer);
-              renderMermaidDiagrams(answerBox).catch(() => {});
+              const canRenderMermaid = hasClosedMermaidFence(streamedAnswer);
+              if (canRenderMermaid) {
+                answerBox.innerHTML = renderAnswerMarkdown(streamedAnswer);
+                renderMermaidDiagrams(answerBox).catch(() => {});
+              } else {
+                answerBox.innerHTML = renderAnswerMarkdown(streamedAnswer, { deferMermaid: true });
+              }
               answerBox.classList.add("is-streaming");
               if (activeConversationTurn) {
                 activeConversationTurn.answer = streamedAnswer;
@@ -1587,8 +1999,6 @@
           currentRequestAbortController = null;
           isRequestInFlight = false;
           syncSubmitButtonState();
-          queryInput.value = "";
-          autoResize();
         }
       }
 
@@ -1623,16 +2033,71 @@
       }
 
       lightboxClose.addEventListener("click", closeImageLightbox);
+      mermaidModalClose.addEventListener("click", closeMermaidModal);
+      mermaidZoomIn.addEventListener("click", () => adjustMermaidZoom(0.2));
+      mermaidZoomOut.addEventListener("click", () => adjustMermaidZoom(-0.2));
+      mermaidResetView.addEventListener("click", resetMermaidModalView);
+      mermaidFitToScreen.addEventListener("click", fitMermaidToScreen);
 
       imageLightbox.addEventListener("click", (event) => {
         if (event.target === imageLightbox) closeImageLightbox();
       });
+      mermaidModal.addEventListener("click", (event) => {
+        if (event.target === mermaidModal) closeMermaidModal();
+      });
+      mermaidModalViewport.addEventListener("wheel", (event) => {
+        if (!mermaidModal.classList.contains("is-open")) return;
+        event.preventDefault();
+        adjustMermaidZoom(event.deltaY < 0 ? 0.15 : -0.15);
+      }, { passive: false });
+      mermaidModalViewport.addEventListener("pointerdown", (event) => {
+        if (mermaidModalScale <= 1) return;
+        mermaidDragState = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          originX: mermaidModalTranslateX,
+          originY: mermaidModalTranslateY,
+        };
+        mermaidModalViewport.classList.add("is-dragging");
+        mermaidModalViewport.setPointerCapture(event.pointerId);
+      });
+      mermaidModalViewport.addEventListener("pointermove", (event) => {
+        if (!mermaidDragState || mermaidDragState.pointerId !== event.pointerId) return;
+        mermaidModalTranslateX = mermaidDragState.originX + (event.clientX - mermaidDragState.startX);
+        mermaidModalTranslateY = mermaidDragState.originY + (event.clientY - mermaidDragState.startY);
+        updateMermaidModalTransform();
+      });
+      mermaidModalViewport.addEventListener("dblclick", () => {
+        if (!mermaidModal.classList.contains("is-open")) return;
+        resetMermaidModalView();
+      });
+      const stopMermaidDrag = (event) => {
+        if (!mermaidDragState) return;
+        if (event?.pointerId != null && mermaidDragState.pointerId !== event.pointerId) return;
+        mermaidModalViewport.classList.remove("is-dragging");
+        try {
+          if (event?.pointerId != null) mermaidModalViewport.releasePointerCapture(event.pointerId);
+        } catch (_) {}
+        mermaidDragState = null;
+      };
+      mermaidModalViewport.addEventListener("pointerup", stopMermaidDrag);
+      mermaidModalViewport.addEventListener("pointercancel", stopMermaidDrag);
 
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape" && imageLightbox.classList.contains("is-open")) closeImageLightbox();
+        if (event.key === "Escape" && mermaidModal.classList.contains("is-open")) closeMermaidModal();
       });
 
       document.addEventListener("click", (event) => {
+        const mermaidZoomTrigger = event.target.closest("[data-mermaid-action='zoom'], .mermaid-preview");
+        if (mermaidZoomTrigger) {
+          const card = mermaidZoomTrigger.closest(".mermaid-card");
+          const block = card?.querySelector("pre.mermaid");
+          const title = card?.querySelector(".mermaid-card-title")?.textContent || "流程图放大查看";
+          openMermaidModal(block, title);
+          return;
+        }
         const image = event.target.closest("img.thumb, img.table-image");
         if (!image) return;
         openImageLightbox(image.getAttribute("src"), resolveImageTitle(image));

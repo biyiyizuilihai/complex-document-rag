@@ -106,6 +106,7 @@ complex_document_rag/ingestion_output/<doc_id>/
 - Python 3.10+
 - Docker
 - 一个可用的 LLM / Embedding API Key
+- 如果本机默认 `python3` 还是 3.9，优先使用 `conda activate test`
 
 ```bash
 python -m venv .venv
@@ -138,7 +139,7 @@ docker run -p 6333:6333 qdrant/qdrant
 ### 4. 启动服务
 
 ```bash
-python complex_document_rag/web_app.py
+python -m complex_document_rag serve
 ```
 
 ### 5. 打开页面
@@ -160,7 +161,7 @@ python complex_document_rag/web_app.py
 ### 方式 B：命令行摄入
 
 ```bash
-python complex_document_rag/step0_document_ingestion.py \
+python -m complex_document_rag ingest \
   --input "/absolute/path/to/file.pdf" \
   --ocr-model qwen3.5-plus \
   --workers 4
@@ -169,7 +170,13 @@ python complex_document_rag/step0_document_ingestion.py \
 然后：
 
 ```bash
-python complex_document_rag/web_app.py
+python -m complex_document_rag serve
+```
+
+如果上传任务目录积累太多，可以直接清理：
+
+```bash
+python -m complex_document_rag cleanup upload-jobs --keep 0
 ```
 
 ## 摄入完成后应该看什么
@@ -348,12 +355,13 @@ python complex_document_rag/web_app.py
 ```text
 complex-document-rag/
 ├── complex_document_rag/
-│   ├── web_app.py
-│   ├── web_helpers.py
-│   ├── step0_document_ingestion.py
-│   ├── step4_basic_query.py
-│   ├── qdrant_management.py
-│   ├── document_ingestion.py
+│   ├── cli.py
+│   ├── core/
+│   ├── ingestion/
+│   ├── indexing/
+│   ├── providers/
+│   ├── retrieval/
+│   ├── web/
 │   └── web_static/
 ├── docs/
 ├── model_provider_utils.py
@@ -367,12 +375,12 @@ complex-document-rag/
 当前建议优先跑这些：
 
 ```bash
-python -m unittest discover -s tests -p 'test_model_provider_utils.py'
-python -m unittest discover -s tests -p 'test_web_app.py'
-python -m unittest discover -s tests -p 'test_document_ingestion.py'
-python -m unittest discover -s tests -p 'test_qdrant_management.py'
-python -m unittest discover -s tests -p 'test_web_static_frontend.py'
-python -m unittest discover -s tests -p 'test_web_static_ingest_frontend.py'
+python -m unittest discover -s tests -p 'test_providers_llms_and_embeddings.py'
+python -m unittest discover -s tests -p 'test_web_*.py'
+python -m unittest discover -s tests -p 'test_ingestion_*.py'
+python -m unittest discover -s tests -p 'test_indexing_qdrant.py'
+python -m unittest discover -s tests -p 'test_web_static_home_page.py'
+python -m unittest discover -s tests -p 'test_web_static_ingest_page.py'
 ```
 
 ## 下一步最值得做的改进
