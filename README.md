@@ -106,6 +106,7 @@ complex_document_rag/ingestion_output/<doc_id>/
 - Python 3.10+
 - Docker
 - 一个可用的 LLM / Embedding API Key
+- 如果要完整拉取仓库中的示例 PDF，建议安装 `git-lfs`
 - 如果本机默认 `python3` 还是 3.9，优先使用 `conda activate test`
 
 ```bash
@@ -126,9 +127,28 @@ cp .env.example .env
 - `OPENAI_API_KEY`
 - 如果使用 DashScope / Qwen：
   - `OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`
-  - `WEB_ANSWER_LLM_MODEL`
-  - `MULTIMODAL_LLM_MODEL`
-  - `EMBEDDING_MODEL`
+  - `MULTIMODAL_LLM_MODEL=qwen3.5-flash`
+  - `TEXT_LLM_MODEL=qwen3.5-flash`
+  - `WEB_ANSWER_LLM_MODEL=qwen3.5-flash`
+  - `EMBEDDING_MODEL=qwen3.5-plus`
+
+推荐直接写成：
+
+```bash
+OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MULTIMODAL_LLM_MODEL=qwen3.5-flash
+TEXT_LLM_MODEL=qwen3.5-flash
+WEB_ANSWER_LLM_MODEL=qwen3.5-flash
+EMBEDDING_MODEL=qwen3.5-plus
+WEB_ANSWER_ENABLE_THINKING=false
+```
+
+如果你是首次克隆这个仓库，并且希望拿到 `samples/` 下的大体积 PDF：
+
+```bash
+git lfs install
+git lfs pull
+```
 
 ### 3. 启动 Qdrant
 
@@ -163,7 +183,7 @@ python -m complex_document_rag serve
 ```bash
 python -m complex_document_rag ingest \
   --input "/absolute/path/to/file.pdf" \
-  --ocr-model qwen3.5-plus \
+  --ocr-model qwen3.5-flash \
   --workers 4
 ```
 
@@ -204,22 +224,27 @@ python -m complex_document_rag cleanup upload-jobs --keep 0
 
 下面这些不是使用问题，是当前实现本身还没完善到位。
 
-### 1. 跨页表格目前没有真正合并成“逻辑表”
+### 1. 跨页表已经会合并成“逻辑表”，但还不是完整表级推理
 
-当前系统会保留：
+当前 ingestion 已经会利用：
 
 - `continued_from_prev`
 - `continues_to_next`
 
-但它只是把“这是续表”记成元数据，并没有把多页表真正拼成一个逻辑表块。
+把多页续表合并成一个逻辑表块，并写出例如：
 
-这意味着：
+- `logical_table_id`
+- `logical_page_numbers`
+- `logical_page_labels`
+- `logical_table_sections`
 
-- 检索时经常返回某一页的片段
-- 回答时可能只看到续表的一部分
-- 用户问整张跨页表时，答案可能不完整
+回答阶段也会尽量按 `logical_table_id` 去重和合并上下文。
 
-这不是并发导致的，是 ingestion 设计还没有做到“续表合并”。
+但它目前仍然不是“完整表级推理”，主要限制在：
+
+- 复杂续表标题、跨章节续表不一定总能稳定合并
+- 回答里看到的仍然是压缩后的结构化表格文本，不是完整 spreadsheet 语义
+- 多张相关表还不会自动按主题联表推理
 
 ### 2. 多表联合处理还很弱
 
@@ -354,7 +379,10 @@ python -m complex_document_rag cleanup upload-jobs --keep 0
 
 ```text
 complex-document-rag/
+├── .env.example
+├── .gitattributes
 ├── complex_document_rag/
+│   ├── __main__.py
 │   ├── cli.py
 │   ├── core/
 │   ├── ingestion/
@@ -364,8 +392,7 @@ complex-document-rag/
 │   ├── web/
 │   └── web_static/
 ├── docs/
-├── model_provider_utils.py
-├── config.py
+├── samples/
 ├── scripts/
 └── tests/
 ```
